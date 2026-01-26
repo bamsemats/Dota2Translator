@@ -1,66 +1,67 @@
 package org.example.bamsemats.dotatranslator;
 
-import com.google.cloud.translate.v3.LocationName;
-import com.google.cloud.translate.v3.TranslateTextRequest;
-import com.google.cloud.translate.v3.TranslateTextResponse;
-import com.google.cloud.translate.v3.TranslationServiceClient;
-import com.google.cloud.translate.v3.TranslationServiceSettings;
-import com.google.auth.oauth2.GoogleCredentials;
+import com.google.api.client.auth.oauth2.Credential;
 import com.google.api.gax.core.FixedCredentialsProvider;
+import com.google.auth.oauth2.UserCredentials; // Change import from GoogleCredentials to UserCredentials
+import com.google.auth.oauth2.AccessToken; // Correctly placed import
 
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.File;
-import javafx.application.Platform;
-import org.example.bamsemats.dotatranslator.ChatWindowController;
-import org.example.bamsemats.dotatranslator.UsageTracker;
 
-import java.util.HashMap; // Added import for HashMap
-import java.util.Map;     // Added import for Map
+import com.google.cloud.translate.v3.*;
+import javafx.application.Platform;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Date; // Needed for expiration time
 
 public class TranslationService {
 
     private final String projectId;
     private final TranslationServiceClient client;
-    private final ChatWindowController chatController;
-    private final Map<String, String> translationCache = new HashMap<>(); // Added translation cache
+    private final MainViewController mainViewController;
+    private final Map<String, String> translationCache = new HashMap<>();
 
-    // The target language for all translations
     private static final String TARGET_LANGUAGE = "en";
 
-    public TranslationService(String projectId, String credentialsFilePath, ChatWindowController chatController) throws IOException {
+    // Constructor now accepts a Credential, Client ID, and Client Secret
+    public TranslationService(String projectId, Credential credential, String clientId, String clientSecret, MainViewController mainViewController) throws IOException {
         this.projectId = projectId;
-        this.chatController = chatController;
+        this.mainViewController = mainViewController;
         TranslationServiceClient tempClient = null;
-        try {
-            if (credentialsFilePath != null && !credentialsFilePath.isEmpty()) {
-                File credentialsFile = new File(credentialsFilePath);
-                if (credentialsFile.exists() && credentialsFile.isFile()) {
-                    GoogleCredentials credentials = GoogleCredentials.fromStream(new FileInputStream(credentialsFilePath));
-                    TranslationServiceSettings settings = TranslationServiceSettings.newBuilder()
-                        .setCredentialsProvider(FixedCredentialsProvider.create(credentials))
-                        .build();
-                    tempClient = TranslationServiceClient.create(settings);
-                } else {
-                    Platform.runLater(() -> chatController.addMessage("Warning: Google Cloud credentials file not found at " + credentialsFilePath + ". Translation will be disabled."));
+        if (credential != null && credential.getAccessToken() != null) { // Check if credential and its token are valid
+            try {
+                // Create com.google.auth.oauth2.AccessToken from com.google.api.client.auth.oauth2.Credential
+                com.google.auth.oauth2.AccessToken googleAuthAccessToken = new com.google.auth.oauth2.AccessToken(
+                    credential.getAccessToken(),
+                    new Date(credential.getExpirationTimeMilliseconds())
+                );
+
+                // Create UserCredentials from the com.google.api.client.auth.oauth2.Credential
+                UserCredentials.Builder userCredentialsBuilder = UserCredentials.newBuilder()
+                    .setAccessToken(googleAuthAccessToken)
+                    .setClientId(clientId) // Set client ID
+                    .setClientSecret(clientSecret); // Set client secret
+
+                if (credential.getRefreshToken() != null) {
+                    userCredentialsBuilder.setRefreshToken(credential.getRefreshToken());
                 }
-            } else {
-                Platform.runLater(() -> chatController.addMessage("No Google Cloud credentials path provided. Translation will be disabled."));
+                
+                UserCredentials credentials = userCredentialsBuilder.build();
+                
+                TranslationServiceSettings settings = TranslationServiceSettings.newBuilder()
+                    .setCredentialsProvider(FixedCredentialsProvider.create(credentials))
+                    .build();
+                tempClient = TranslationServiceClient.create(settings);
+            } catch (Exception e) {
+                Platform.runLater(() -> mainViewController.addMessage("Error initializing Google Cloud Translation Service with Credential: " + e.getClass().getSimpleName() + ". Translation will be disabled."));
+                System.err.println("Error initializing Google Cloud Translation Service with Credential:");
+                e.printStackTrace();
             }
-        } catch (Exception e) {
-            Platform.runLater(() -> chatController.addMessage("Error initializing Google Cloud Translation Service: " + e.getMessage() + ". Translation will be disabled."));
-            System.err.println("Error initializing Google Cloud Translation Service: " + e.getMessage());
+        } else {
+            Platform.runLater(() -> mainViewController.addMessage("No Google Cloud Credential (or valid Access Token) provided. Translation will be disabled."));
         }
         this.client = tempClient;
     }
 
-    /**
-     * Translates text from a detected source language to English.
-     *
-     * @param sourceText The text to translate.
-     * @param sourceLanguage The detected source language code (e.g., "ru", "fr").
-     * @return The translated text, or the original text if translation fails or is not needed.
-     */
     public String translateText(String sourceText, String sourceLanguage) {
         if (this.client == null || sourceText == null || sourceText.trim().isEmpty() || TARGET_LANGUAGE.equalsIgnoreCase(sourceLanguage)) {
             return sourceText;
@@ -68,13 +69,11 @@ public class TranslationService {
 
         String cacheKey = sourceText + "::" + sourceLanguage;
         if (translationCache.containsKey(cacheKey)) {
-            // System.out.println("DEBUG: Returning cached translation for: " + sourceText); // Optional debug
             return translationCache.get(cacheKey);
         }
 
-        // --- Safeguard: Check Translation API limit ---
         if (UsageTracker.isTranslationLimitReached()) {
-            Platform.runLater(() -> chatController.addMessage("Warning: Translation free tier limit reached for this month. Further translation requests are blocked."));
+            Platform.runLater(() -> mainViewController.addMessage("Warning: Translation free tier limit reached for this month. Further translation requests are blocked."));
             return sourceText;
         }
 
@@ -92,12 +91,10 @@ public class TranslationService {
 
             TranslateTextResponse response = client.translateText(request);
 
-            // Increment usage on successful request
             UsageTracker.incrementTranslationCharacters(sourceText.length());
 
-            // --- Safeguard: Check for warning threshold ---
             if (UsageTracker.getTranslationUsagePercentage() >= 80 && UsageTracker.getTranslationUsagePercentage() < 100) {
-                Platform.runLater(() -> chatController.addMessage(
+                Platform.runLater(() -> mainViewController.addMessage(
                         String.format("Warning: Translation usage is at %.0f%% of the free tier limit (%d/%d characters). You may be billed soon.",
                                 UsageTracker.getTranslationUsagePercentage(), UsageTracker.getTranslationCharacters(), UsageTracker.getTranslationFreeTierLimit())
                 ));
@@ -105,13 +102,12 @@ public class TranslationService {
 
             if (!response.getTranslationsList().isEmpty()) {
                 String translatedText = response.getTranslationsList().get(0).getTranslatedText();
-                translationCache.put(cacheKey, translatedText); // Add to cache
+                translationCache.put(cacheKey, translatedText);
                 return translatedText;
             }
         } catch (Exception e) {
             System.err.println("Error during translation: " + e.getMessage());
-            Platform.runLater(() -> chatController.addMessage("Error translating: " + e.getMessage()));
-            // Fallback: return original text if translation fails
+            Platform.runLater(() -> mainViewController.addMessage("Error translating: " + e.getMessage()));
         }
         return sourceText;
     }
@@ -122,3 +118,4 @@ public class TranslationService {
         }
     }
 }
+

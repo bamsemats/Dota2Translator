@@ -1,32 +1,22 @@
+import sys
+import codecs
 import os
 from flask import Flask, request, jsonify
 import numpy as np
 import cv2
 import io
 from google.cloud import vision
-from google.cloud import translate_v3 as translate # Added import for Translation API
-from google.oauth2 import service_account
+from google.cloud import translate_v3 as translate
+from google.auth.credentials import AccessToken # Correct import for AccessToken
+
+# Force UTF-8 encoding for stdout and stderr
+if sys.stdout.encoding != 'UTF-8':
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+if sys.stderr.encoding != 'UTF-8':
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
 
 app = Flask(__name__)
 app.json.ensure_ascii = False # Try to preserve Unicode
-
-# --- Google Cloud Vision Initialization ---
-# Prioritize GOOGLE_APPLICATION_CREDENTIALS environment variable
-if 'GOOGLE_APPLICATION_CREDENTIALS' in os.environ:
-    credentials_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-    print(f"Loading credentials from GOOGLE_APPLICATION_CREDENTIALS: {credentials_path}")
-    credentials = service_account.Credentials.from_service_account_file(credentials_path)
-else:
-    # Fallback to local gcp_credentials.json
-    credentials_path = os.path.join(os.path.dirname(__file__), 'gcp_credentials.json')
-    print(f"Loading credentials from local file: {credentials_path}")
-    credentials = service_account.Credentials.from_service_account_file(credentials_path)
-
-vision_client = vision.ImageAnnotatorClient(credentials=credentials)
-
-# --- Google Cloud Translation Initialization --- # Added Translation Client
-translate_client = translate.TranslationServiceClient(credentials=credentials)
-project_id = credentials.project_id # Get project ID from credentials
 
 def preprocess_for_dota(img):
     """
@@ -62,25 +52,37 @@ def preprocess_for_dota(img):
 
 @app.route('/ocr', methods=['POST'])
 def ocr_endpoint():
-    if 'file' not in request.files:
-        return "No file part", 400
-    file = request.files['file']
-    if file.filename == '':
-        return "No selected file", 400
-    if not file:
-        return "Invalid file", 400
+    access_token_str = request.headers.get('Authorization')
+    project_id = request.headers.get('X-Google-Cloud-Project-Id')
+
+    if not access_token_str or not access_token_str.startswith('Bearer '):
+        return "Unauthorized: Missing or invalid Authorization header", 401
+    if not project_id:
+        return "Bad Request: Missing X-Google-Cloud-Project-Id header", 400
+
+    access_token_value = access_token_str.split(' ')[1] # Extract token from "Bearer <token>"
 
     try:
+        # Dynamically create credentials from the access token string
+        token_credentials = AccessToken(access_token_value, expiration=None)
+        
+        vision_client = vision.ImageAnnotatorClient(credentials=token_credentials)
+        translate_client = translate.TranslationServiceClient(credentials=token_credentials)
+
+        if 'file' not in request.files:
+            return "No file part", 400
+        file = request.files['file']
+        if file.filename == '':
+            return "No selected file", 400
+        if not file:
+            return "Invalid file", 400
+
         # Read image file into memory
         in_memory_file = io.BytesIO()
         file.save(in_memory_file)
         in_memory_file.seek(0)
         content = in_memory_file.read()
         
-        # Decode image with OpenCV to preprocess it
-        nparr = np.frombuffer(content, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
         # Call the Google Cloud Vision API with the original image content
         gcp_image = vision.Image(content=content)
         response = vision_client.text_detection(image=gcp_image)
@@ -92,9 +94,6 @@ def ocr_endpoint():
         if response.text_annotations:
             # The first text annotation is the entire page
             full_text = response.text_annotations[0].description
-            # Split the full text into lines based on newline characters
-            # This is a simplification; for more precise line detection,
-            # one might process individual text_annotations more carefully
             lines_from_vision = full_text.split('\n')
 
             for line_text in lines_from_vision:
@@ -109,7 +108,6 @@ def ocr_endpoint():
                     )
                     detected_language = "und" # Undetermined by default
                     if lang_detect_response.languages:
-                        # Take the language with the highest confidence
                         detected_language = max(lang_detect_response.languages, key=lambda x: x.confidence).language_code
                     
                     extracted_lines.append({
@@ -117,16 +115,12 @@ def ocr_endpoint():
                         "language": detected_language
                     })
         
-        # Log for debugging
-        print(f"Extracted Lines: {extracted_lines}")
+        print(f"Extracted Lines: {extracted_lines!r}") # Use !r for better debugging of unicode
 
         return jsonify(extracted_lines)
 
     except Exception as e:
-        print(f"An error occurred: {e}")
-        # Check for auth errors specifically
-        if "Could not automatically determine credentials" in str(e):
-             print("Authentication failed. Did you set the GOOGLE_APPLICATION_CREDENTIALS environment variable?")
+        print(f"An error occurred: {e!r}") # Use !r for better debugging
         return f"An internal error occurred: {e}", 500
 
 if __name__ == '__main__':
