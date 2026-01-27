@@ -31,6 +31,7 @@ class AppConfig:
         self.config['UI']['theme'] = "Light"
         self.config['General']['hotkey'] = "<f8>" # Default hotkey
         self.config['GoogleCloud']['project_id'] = ""
+        self.config['General']['first_run'] = "True" # New: Flag for first run
 
     def _save_config(self):
         with open(self.config_path, 'w') as configfile:
@@ -93,5 +94,12 @@ class AppConfig:
 
     def set_hotkey(self, hotkey_str):
         self.set('General', 'hotkey', hotkey_str)
+
+    def get_first_run(self):
+        return self.config.getboolean('General', 'first_run', fallback=True)
+
+    def set_first_run(self, is_first_run):
+        self.set('General', 'first_run', str(is_first_run))
+
 
 

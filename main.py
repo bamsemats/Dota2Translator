@@ -2,6 +2,9 @@ import tkinter as tk
 from tkinter import ttk, font
 import threading
 import os
+import re # Added for chat parsing
+
+from PIL import ImageTk, Image # Added for image display
 
 from screenshot_utils import RegionSelector, ScreenCapture
 from config import AppConfig
@@ -21,7 +24,7 @@ class DotaChatTranslatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Dota 2 Chat Translator")
-        self.root.geometry("420x520")
+        self.root.geometry("420x720") # Adjusted geometry to accommodate the image panel
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -45,6 +48,9 @@ class DotaChatTranslatorApp:
         # Hotkey listener
         self.keybinding_service = KeybindingService(self.take_snapshot, self.hotkey_str)
         self.keybinding_service.start_listener()
+
+        self.last_screenshot_pil = None # Stores the PIL Image object
+        self.last_screenshot_tk = None # Stores the PhotoImage object for Tkinter to display
 
         self.create_widgets()
         self.apply_font_settings(self.current_font_family, self.current_font_size)
@@ -93,6 +99,17 @@ class DotaChatTranslatorApp:
             state=tk.DISABLED
         )
         self.translation_display.pack(fill=tk.BOTH, expand=True)
+        self.translation_display.tag_configure("bold", font=(self.current_font_family, self.current_font_size, "bold"))
+        self.translation_display.tag_configure("allies_tag", foreground="green") # Configure green for Allies tag
+        self.translation_display.tag_configure("sender_tag", foreground="yellow") # Configure yellow for sender
+        self.translation_display.tag_configure("message_tag", foreground="white") # Default white for message
+
+        # New section for displaying the last captured screenshot
+        self.screenshot_frame = ttk.LabelFrame(self.main_frame, text="Last Captured Region", padding=5)
+        self.screenshot_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        self.screenshot_label = ttk.Label(self.screenshot_frame, text="No screenshot yet")
+        self.screenshot_label.pack(fill=tk.BOTH, expand=True)
 
 
 # =====================================================
@@ -113,6 +130,10 @@ class DotaChatTranslatorApp:
                 fg="white",
                 insertbackground="white"
             )
+            # Update tag colors for dark theme if necessary (e.g. if default foreground is black)
+            self.translation_display.tag_configure("allies_tag", foreground="lightgreen") 
+            self.translation_display.tag_configure("sender_tag", foreground="gold")
+            self.translation_display.tag_configure("message_tag", foreground="white")
         else:
             style.theme_use("default")
 
@@ -121,6 +142,10 @@ class DotaChatTranslatorApp:
                 fg="black",
                 insertbackground="black"
             )
+            # Update tag colors for light theme if necessary
+            self.translation_display.tag_configure("allies_tag", foreground="darkgreen")
+            self.translation_display.tag_configure("sender_tag", foreground="darkgoldenrod")
+            self.translation_display.tag_configure("message_tag", foreground="black")
 
 
 # =====================================================
@@ -134,6 +159,8 @@ class DotaChatTranslatorApp:
         new_font = font.Font(family=family, size=size)
 
         self.translation_display.config(font=new_font)
+        self.translation_display.tag_configure("bold", font=(family, size, "bold")) # Update bold tag
+
 
         self.config.set_font_family(family)
         self.config.set_font_size(size)
@@ -187,6 +214,8 @@ class DotaChatTranslatorApp:
                 self.safe_notify("Screenshot failed.")
                 return
 
+            self.last_screenshot_pil = screenshot # Store the PIL Image
+
             extracted_lines = self.ocr_service.extract_text_from_image(screenshot)
 
             all_translated_lines = []
@@ -201,6 +230,7 @@ class DotaChatTranslatorApp:
                 all_translated_lines.append((original, translated))
 
             self.root.after(0, lambda: self.display_translation(all_translated_lines))
+            self.root.after(0, self.display_last_screenshot) # Call the method to display the screenshot
 
         except Exception as e:
             self.safe_notify(f"Error: {e}")
@@ -208,19 +238,108 @@ class DotaChatTranslatorApp:
 
     def display_translation(self, all_translated_lines):
         self.translation_display.config(state=tk.NORMAL)
-        self.translation_display.delete("1.0", tk.END)
         
-        formatted_output = []
+        # Add a newline only if there's already content, to separate new entries
+        if self.translation_display.index(tk.END) != "1.0":
+            self.translation_display.insert(tk.END, "\n\n") # Double newline for better separation
+        
         for original_text, translated_text in all_translated_lines:
+            # Parse the original text for structured display
+            parsed = self.parse_chat_line(original_text)
+
+            # Insert translated text first
+            self.translation_display.insert(tk.END, translated_text + "\n")
+
+            # Insert the parsed original components
+            if parsed["tag"]:
+                self.translation_display.insert(tk.END, f"[{parsed['tag']}] ", "allies_tag")
+            if parsed["sender"]:
+                self.translation_display.insert(tk.END, f"{parsed['sender']}: ", "sender_tag")
+            
+            # Insert the message part. If the original text was translated, show it in bold.
             if original_text.strip() != translated_text.strip():
-                formatted_output.append(f"{translated_text} ({original_text})")
+                 self.translation_display.insert(tk.END, parsed["message"], "bold")
             else:
-                formatted_output.append(original_text) # If no translation, just show original
+                self.translation_display.insert(tk.END, parsed["message"], "message_tag") # Use message_tag for consistent color
+            
+            self.translation_display.insert(tk.END, "\n") # Newline after each original entry
         
-        self.translation_display.insert(tk.END, "\n".join(formatted_output))
+        # Auto-scroll to the end of the text widget
+        self.translation_display.see(tk.END)
         self.translation_display.config(state=tk.DISABLED)
 
         self.update_notification("Done.")
+
+
+    def display_last_screenshot(self):
+        if self.last_screenshot_pil:
+            # Get the current size of the label to scale the image
+            # Need to use root.update_idletasks() to ensure widget has correct size
+            self.root.update_idletasks()
+            
+            # Determine maximum display size
+            max_width = self.screenshot_label.winfo_width()
+            max_height = self.screenshot_label.winfo_height()
+
+            if max_width <= 1 or max_height <= 1: # Handle case where widget is not yet fully rendered or invisible
+                max_width = 400 # Default fallback
+                max_height = 200 # Default fallback
+            
+            img_width, img_height = self.last_screenshot_pil.size
+            
+            # Calculate aspect ratio to fit within max_width and max_height
+            ratio = min(max_width / img_width, max_height / img_height)
+            new_width = int(img_width * ratio)
+            new_height = int(img_height * ratio)
+            
+            resized_image = self.last_screenshot_pil.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            self.last_screenshot_tk = ImageTk.PhotoImage(resized_image)
+            
+            self.screenshot_label.config(image=self.last_screenshot_tk, text="")
+        else:
+            self.screenshot_label.config(image="", text="No screenshot yet")
+
+
+# =====================================================
+# CHAT PARSING
+# =====================================================
+
+    def parse_chat_line(self, chat_line):
+        parsed = {
+            "tag": None, # e.g., "Allies" or "Team" etc.
+            "sender": None,
+            "message": chat_line.strip() # Default to full line if not parsed
+        }
+
+        temp_line = chat_line.strip()
+
+        # Regex for [Allies] or [Team] or similar tags
+        tag_match = re.match(r"^(?:\[(Allies|Team)\]\s*)?(.*)$", temp_line)
+        if tag_match:
+            if tag_match.group(1):
+                parsed["tag"] = tag_match.group(1)
+            temp_line = tag_match.group(2).strip()
+
+        # Look for sender: message pattern (last colon)
+        # This needs to be robust against "player icon noise" which is typically at the very start
+        if ':' in temp_line:
+            parts = temp_line.rsplit(':', 1)
+            potential_sender = parts[0].strip()
+            message_part = parts[1].strip()
+
+            # Simple validation for sender: not too long, contains some alphanumeric chars
+            # This helps to filter out OCR noise picked up as 'sender'
+            if 1 < len(potential_sender) < 30 and re.search(r'\w', potential_sender):
+                parsed["sender"] = potential_sender
+                parsed["message"] = message_part
+            else:
+                # If sender looks like garbage, treat the whole thing as a message
+                parsed["message"] = chat_line.strip()
+        else:
+            # If no colon, assume it's just a message (e.g., system messages)
+            parsed["message"] = chat_line.strip()
+        
+        return parsed
 
 
 # =====================================================
@@ -305,7 +424,7 @@ class DotaChatTranslatorApp:
         elif not self.credentials:
             self.update_notification("Authorize Google Cloud.")
         else:
-            self.update_.notification("Ready.")
+            self.update_notification("Ready.")
 
 
     def on_closing(self):
@@ -380,7 +499,7 @@ class SettingsWindow(tk.Toplevel):
             from_=8,
             to=36,
             textvariable=self.font_size,
-            command=self.update_.font
+            command=self.update_font
         ).pack(fill=tk.X, pady=4)
 
         # Theme

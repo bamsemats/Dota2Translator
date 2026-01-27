@@ -61,6 +61,8 @@ Since translation is handled by Google Cloud, you still need a Google Cloud Proj
    - Go to `Settings -> Google Cloud`.
    - Paste your Google Cloud **Project ID** into the entry box and click "Save Project ID".
 
+**SECURITY WARNING:** The `client_secret.json` file contains credentials for your Google Cloud Project. **NEVER commit this file to a public version control repository (like GitHub).** Always ensure it's listed in your `.gitignore` to prevent accidental exposure.
+
 ## How to Run
 
 Execute the `run.bat` script or run the main python file:
