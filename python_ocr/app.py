@@ -7,7 +7,7 @@ import cv2
 import io
 from google.cloud import vision
 from google.cloud import translate_v3 as translate
-from google.auth.credentials import AccessToken # Correct import for AccessToken
+from google.oauth2.credentials import Credentials # Correct import for Credentials
 
 # Force UTF-8 encoding for stdout and stderr
 if sys.stdout.encoding != 'UTF-8':
@@ -64,7 +64,16 @@ def ocr_endpoint():
 
     try:
         # Dynamically create credentials from the access token string
-        token_credentials = AccessToken(access_token_value, expiration=None)
+        # Provide the token and an explicit token_uri to hint its type
+        # The token_uri is typically "https://oauth2.googleapis.com/token" for user OAuth.
+        token_credentials = Credentials(
+            token=access_token_value,
+            refresh_token=None, # Java handles refreshing
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=None, # Client ID is not strictly needed here for an already-obtained access token
+            client_secret=None, # Client Secret is not strictly needed here
+            scopes=['https://www.googleapis.com/auth/cloud-platform'] # Re-declare scopes
+        )
         
         vision_client = vision.ImageAnnotatorClient(credentials=token_credentials)
         translate_client = translate.TranslationServiceClient(credentials=token_credentials)

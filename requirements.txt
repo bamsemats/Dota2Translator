@@ -1,0 +1,9 @@
+Pillow
+opencv-python
+pytesseract
+google-cloud-translate
+google-auth-oauthlib
+numpy
+pynput
+pyinstaller
+PyJWT
