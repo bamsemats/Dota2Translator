@@ -3,6 +3,7 @@ from tkinter import ttk, font
 import threading
 import os
 import re # Added for chat parsing
+import subprocess
 
 from PIL import ImageTk, Image # Added for image display
 
@@ -59,6 +60,11 @@ class DotaChatTranslatorApp:
         self.authorize_google_cloud_startup()
 
         self.show_startup_status()
+
+        # Check for first run to open README
+        if self.config.get_first_run():
+            self._open_readme_file()
+            self.config.set_first_run(False) # Set to False after opening, so it doesn't open again
 
 
 # =====================================================
@@ -431,6 +437,21 @@ class DotaChatTranslatorApp:
         self.keybinding_service.stop_listener()
         self.root.destroy()
 
+# =====================================================
+# AUTO-OPEN README ON FIRST RUN
+# =====================================================
+
+    def _open_readme_file(self):
+        readme_path = os.path.join(os.path.dirname(__file__), "README.md")
+        if os.path.exists(readme_path):
+            try:
+                # Use os.startfile for Windows to open with default application
+                os.startfile(readme_path)
+                self.update_notification("Opened README.md for first-time setup.")
+            except Exception as e:
+                self.update_notification(f"Could not open README.md: {e}")
+        else:
+            self.update_notification("README.md not found. Please ensure it's in the app's directory.")
 
 # =====================================================
 # SETTINGS WINDOW CLASS
