@@ -29,25 +29,30 @@ class OcrService:
         upper_white = np.array([180, 50, 255])
         white_mask = cv2.inRange(hsv, lower_white, upper_white)
         
-        # Blue (All-Chat/System)
-        lower_blue = np.array([85, 50, 150])
+        # Blue (All-Chat/System/Teal)
+        lower_blue = np.array([85, 100, 100])
         upper_blue = np.array([130, 255, 255])
         blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
         # Green (Allies)
-        lower_green = np.array([40, 50, 150])
+        lower_green = np.array([40, 100, 100])
         upper_green = np.array([80, 255, 255])
         green_mask = cv2.inRange(hsv, lower_green, upper_green)
 
-        # Yellow/Gold (System/Names)
-        lower_yellow = np.array([20, 50, 150])
+        # Yellow/Gold/Orange (System/Names)
+        lower_yellow = np.array([15, 100, 100])
         upper_yellow = np.array([35, 255, 255])
         yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
+        # Purple/Pink (Names)
+        lower_purple = np.array([130, 100, 100])
+        upper_purple = np.array([175, 255, 255])
+        purple_mask = cv2.inRange(hsv, lower_purple, upper_purple)
+
         # Red (System/Enemies)
-        lower_red1 = np.array([0, 50, 150])
+        lower_red1 = np.array([0, 100, 100])
         upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 50, 150])
+        lower_red2 = np.array([170, 100, 100])
         upper_red2 = np.array([180, 255, 255])
         red_mask = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), 
                                  cv2.inRange(hsv, lower_red2, upper_red2))
@@ -56,10 +61,11 @@ class OcrService:
         combined_mask = cv2.bitwise_or(white_mask, blue_mask)
         combined_mask = cv2.bitwise_or(combined_mask, green_mask)
         combined_mask = cv2.bitwise_or(combined_mask, yellow_mask)
+        combined_mask = cv2.bitwise_or(combined_mask, purple_mask)
         combined_mask = cv2.bitwise_or(combined_mask, red_mask)
         
-        # Clean up noise
-        kernel = np.ones((1, 1), np.uint8) # Smaller kernel to preserve thin characters
+        # Clean up noise - using a slightly more balanced approach
+        kernel = np.ones((1, 1), np.uint8)
         opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
         
         # Final result: White text on black background
@@ -101,8 +107,9 @@ class OcrService:
             processed_img_pass1 = self.preprocess_for_dota(pil_image)
             cv2.imwrite("ocr_debug_processed_pass1.png", processed_img_pass1)
             
+            # Reverting to PSM 4 which was reportedly better for character recognition
             config = '--oem 1 --psm 4'
-            lang_list = 'eng+rus+spa+por+chi_sim+swe' # Added Swedish
+            lang_list = 'eng+rus+spa+por+chi_sim' # Removed swe temporarily to rule out lang issues
             
             all_text = pytesseract.image_to_string(
                 processed_img_pass1,

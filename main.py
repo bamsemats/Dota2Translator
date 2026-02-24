@@ -316,14 +316,16 @@ class DotaChatTranslatorApp:
                 parsed = self.parse_chat_line(text)
                 
                 # --- Multi-line Joining Logic ---
-                # If this line has no tag and no sender, it might be a continuation of the previous message
+                # Only join if:
+                # 1. This line has NO tag and NO sender
+                # 2. There is a previous message
+                # 3. The previous message had a sender (wasn't just noise)
+                # 4. The current line doesn't look like a new message (doesn't start with typical patterns)
                 if not parsed["tag"] and not parsed["sender"] and processed_messages:
                     prev_msg = processed_messages[-1]
-                    # Only join if the previous message actually had a sender (i.e. it wasn't just noise or a system msg)
-                    if prev_msg["sender"] or prev_msg["tag"]:
+                    if prev_msg["sender"]:
+                        # Append to previous message instead of adding new
                         prev_msg["message"] += " " + parsed["message"]
-                        # We'll re-translate the combined message later or just append translation
-                        # For simplicity, let's just append for now, or re-translate below
                         continue 
 
                 processed_messages.append(parsed)
@@ -427,7 +429,7 @@ class DotaChatTranslatorApp:
 
         temp_line = chat_line.strip()
 
-        # Improved Tag Detection: Allow noise before tag, and match more tag types
+        # 1. Tag Detection
         # Matches [Allies], (Allies), [All], [Team], etc.
         tag_pattern = r"(?:.*?)([\[\(](Allies|Team|All)[\]\)])\s*(.*)"
         tag_match = re.search(tag_pattern, temp_line, re.IGNORECASE)
@@ -436,26 +438,48 @@ class DotaChatTranslatorApp:
             parsed["tag"] = tag_match.group(2)
             temp_line = tag_match.group(3).strip()
 
-        # Improved Sender Detection:
-        # Look for a colon or semicolon as a separator
+        # 2. Sender Detection
+        # Case A: Colon or Semicolon present (Standard)
         if ":" in temp_line or ";" in temp_line:
             split_char = ":" if ":" in temp_line else ";"
             parts = temp_line.split(split_char, 1)
             potential_sender = parts[0].strip()
             message_part = parts[1].strip()
 
-            # Sender validation: allow 1-30 chars, must have at least one alphanumeric
+            # Validate sender (1-30 chars, contains alphanumeric)
             if 1 <= len(potential_sender) <= 30 and re.search(r'\w', potential_sender):
                 parsed["sender"] = potential_sender
-                # Clean up the message part (remove leading/trailing artifacts)
-                parsed["message"] = message_part.lstrip(":;,. ").strip()
+                parsed["message"] = message_part
             else:
-                parsed["message"] = temp_line.lstrip(":;,. ").strip()
-        else:
-            parsed["message"] = temp_line.lstrip(":;,. ").strip()
+                parsed["message"] = temp_line
         
+        # Case B: No colon, but we have a tag - first word might be the sender
+        elif parsed["tag"] and temp_line:
+            # If there's a space, split it. If not, the whole thing might be the sender or message.
+            if " " in temp_line:
+                parts = temp_line.split(" ", 1)
+                potential_sender = parts[0].strip()
+                # If the first word looks like a name (no weird punctuation), assume it's a sender
+                if re.match(r'^\w+$', potential_sender):
+                    parsed["sender"] = potential_sender
+                    parsed["message"] = parts[1].strip()
+                else:
+                    parsed["message"] = temp_line
+            else:
+                # Only one word after tag. If it's short, could be a sender with an empty message.
+                if 1 <= len(temp_line) <= 15 and re.match(r'^\w+$', temp_line):
+                    parsed["sender"] = temp_line
+                    parsed["message"] = ""
+                else:
+                    parsed["message"] = temp_line
+        
+        # Case C: No tag, no colon. Likely a system message or a continuation.
+        else:
+            parsed["message"] = temp_line
+
         # Final cleanup for common OCR garbage at start of message
-        # e.g. "© Hello" or "» Hi"
+        # e.g. "© Hello" or "» Hi" or ": "
+        parsed["message"] = parsed["message"].lstrip(":;,. ").strip()
         parsed["message"] = re.sub(r"^[^\w\s\[\(]+", "", parsed["message"]).strip()
         
         return parsed
