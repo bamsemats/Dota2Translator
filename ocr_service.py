@@ -17,25 +17,52 @@ class OcrService:
     def preprocess_for_dota(self, pil_image):
         """
         Primary processing pipeline for light text on a dark/semi-transparent background.
-        Uses HSV color masking.
+        Uses expanded HSV color masking for common Dota chat colors.
         """
         numpy_image = np.array(pil_image)
         img = cv2.cvtColor(numpy_image, cv2.COLOR_RGB2BGR)
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         
-        lower_white = np.array([0, 0, 150])
-        upper_white = np.array([255, 100, 255])
+        # Define color ranges for common Dota chat text
+        # White
+        lower_white = np.array([0, 0, 180])
+        upper_white = np.array([180, 50, 255])
         white_mask = cv2.inRange(hsv, lower_white, upper_white)
         
-        lower_blue = np.array([85, 100, 200])
-        upper_blue = np.array([110, 255, 255])
+        # Blue (All-Chat/System)
+        lower_blue = np.array([85, 50, 150])
+        upper_blue = np.array([130, 255, 255])
         blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+        # Green (Allies)
+        lower_green = np.array([40, 50, 150])
+        upper_green = np.array([80, 255, 255])
+        green_mask = cv2.inRange(hsv, lower_green, upper_green)
+
+        # Yellow/Gold (System/Names)
+        lower_yellow = np.array([20, 50, 150])
+        upper_yellow = np.array([35, 255, 255])
+        yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+
+        # Red (System/Enemies)
+        lower_red1 = np.array([0, 50, 150])
+        upper_red1 = np.array([10, 255, 255])
+        lower_red2 = np.array([170, 50, 150])
+        upper_red2 = np.array([180, 255, 255])
+        red_mask = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), 
+                                 cv2.inRange(hsv, lower_red2, upper_red2))
         
+        # Combine all masks
         combined_mask = cv2.bitwise_or(white_mask, blue_mask)
+        combined_mask = cv2.bitwise_or(combined_mask, green_mask)
+        combined_mask = cv2.bitwise_or(combined_mask, yellow_mask)
+        combined_mask = cv2.bitwise_or(combined_mask, red_mask)
         
-        kernel = np.ones((2, 2), np.uint8)
+        # Clean up noise
+        kernel = np.ones((1, 1), np.uint8) # Smaller kernel to preserve thin characters
         opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
         
+        # Final result: White text on black background
         result_img = np.zeros_like(img)
         result_img[opened_mask > 0] = (255, 255, 255)
         
@@ -74,7 +101,7 @@ class OcrService:
             processed_img_pass1 = self.preprocess_for_dota(pil_image)
             cv2.imwrite("ocr_debug_processed_pass1.png", processed_img_pass1)
             
-            config = '--oem 1 --psm 3'
+            config = '--oem 1 --psm 4'
             lang_list = 'eng+rus+spa+por+chi_sim+swe' # Added Swedish
             
             all_text = pytesseract.image_to_string(
@@ -98,7 +125,7 @@ class OcrService:
             # --- Process and return the final result ---
             extracted_lines = []
             for line_text in all_text.split('\n'):
-                line_text = line_text.strip()
+                line_text = self.clean_ocr_text(line_text)
                 if line_text:
                     extracted_lines.append({
                         "text": line_text,
@@ -113,3 +140,28 @@ class OcrService:
         except Exception as e:
             print(f"Error during local OCR with Tesseract: {e}")
             return []
+
+    def clean_ocr_text(self, text):
+        """
+        Removes common OCR artifacts and garbage characters.
+        """
+        text = text.strip()
+        if not text:
+            return ""
+
+        # Remove very short lines that are likely just noise (e.g. single symbols)
+        # but keep single words or letters if they might be part of chat.
+        if len(text) == 1 and not text.isalnum():
+            return ""
+
+        # Remove common "edge noise" symbols that Tesseract often picks up from borders/icons
+        # while keeping characters from supported languages.
+        # We'll use a regex to keep alphanumeric, spaces, and basic punctuation
+        # plus characters in the range of Russian/Chinese etc.
+        # This is a bit complex, so we'll start with a simpler approach:
+        # just strip some known bad characters.
+        bad_chars = '§|\\_~`'
+        for char in bad_chars:
+            text = text.replace(char, '')
+
+        return text.strip()

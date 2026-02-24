@@ -109,6 +109,7 @@ class DotaChatTranslatorApp:
         self.translation_display.tag_configure("allies_tag", foreground="green") # Configure green for Allies tag
         self.translation_display.tag_configure("sender_tag", foreground="yellow") # Configure yellow for sender
         self.translation_display.tag_configure("message_tag", foreground="white") # Default white for message
+        self.translation_display.tag_configure("original_tag", foreground="#888888") # Dimmed gray for original text
 
         # New section for displaying the last captured screenshot
         self.screenshot_frame = ttk.LabelFrame(self.main_frame, text="Last Captured Region", padding=5)
@@ -140,6 +141,7 @@ class DotaChatTranslatorApp:
             self.translation_display.tag_configure("allies_tag", foreground="lightgreen") 
             self.translation_display.tag_configure("sender_tag", foreground="gold")
             self.translation_display.tag_configure("message_tag", foreground="white")
+            self.translation_display.tag_configure("original_tag", foreground="#aaaaaa") # Light gray for dark theme
         else:
             style.theme_use("default")
 
@@ -152,6 +154,7 @@ class DotaChatTranslatorApp:
             self.translation_display.tag_configure("allies_tag", foreground="darkgreen")
             self.translation_display.tag_configure("sender_tag", foreground="darkgoldenrod")
             self.translation_display.tag_configure("message_tag", foreground="black")
+            self.translation_display.tag_configure("original_tag", foreground="#555555") # Dark gray for light theme
 
 
 # =====================================================
@@ -224,51 +227,73 @@ class DotaChatTranslatorApp:
 
             extracted_lines = self.ocr_service.extract_text_from_image(screenshot)
 
-            all_translated_lines = []
+            processed_messages = []
 
             for line in extracted_lines:
                 text = line["text"]
-                src_lang = line.get("language", "und")
-
-                original, translated = self.translation_service.translate_text(text, src_lang)
+                parsed = self.parse_chat_line(text)
                 
-                # Append a tuple (original, translated) for later formatting
-                all_translated_lines.append((original, translated))
+                # --- Multi-line Joining Logic ---
+                # If this line has no tag and no sender, it might be a continuation of the previous message
+                if not parsed["tag"] and not parsed["sender"] and processed_messages:
+                    prev_msg = processed_messages[-1]
+                    # Only join if the previous message actually had a sender (i.e. it wasn't just noise or a system msg)
+                    if prev_msg["sender"] or prev_msg["tag"]:
+                        prev_msg["message"] += " " + parsed["message"]
+                        # We'll re-translate the combined message later or just append translation
+                        # For simplicity, let's just append for now, or re-translate below
+                        continue 
 
-            self.root.after(0, lambda: self.display_translation(all_translated_lines))
+                processed_messages.append(parsed)
+
+            # Translation pass on the final structured messages
+            for msg_obj in processed_messages:
+                if msg_obj["message"]:
+                    original_msg = msg_obj["message"]
+                    # We don't know the exact lang for joined lines, use "und"
+                    _, translated_msg = self.translation_service.translate_text(original_msg, "und")
+                    msg_obj["translated_message"] = translated_msg
+                else:
+                    msg_obj["translated_message"] = ""
+
+            self.root.after(0, lambda: self.display_translation(processed_messages))
             self.root.after(0, self.display_last_screenshot) # Call the method to display the screenshot
 
         except Exception as e:
             self.safe_notify(f"Error: {e}")
 
 
-    def display_translation(self, all_translated_lines):
+    def display_translation(self, processed_messages):
         self.translation_display.config(state=tk.NORMAL)
         
         # Add a newline only if there's already content, to separate new entries
         if self.translation_display.index(tk.END) != "1.0":
             self.translation_display.insert(tk.END, "\n\n") # Double newline for better separation
         
-        for original_text, translated_text in all_translated_lines:
-            # Parse the original text for structured display
-            parsed = self.parse_chat_line(original_text)
+        for msg_obj in processed_messages:
+            tag = msg_obj["tag"]
+            sender = msg_obj["sender"]
+            original_msg = msg_obj["message"]
+            translated_msg = msg_obj["translated_message"]
 
-            # Insert translated text first
-            self.translation_display.insert(tk.END, translated_text + "\n")
-
-            # Insert the parsed original components
-            if parsed["tag"]:
-                self.translation_display.insert(tk.END, f"[{parsed['tag']}] ", "allies_tag")
-            if parsed["sender"]:
-                self.translation_display.insert(tk.END, f"{parsed['sender']}: ", "sender_tag")
+            # 1. Display Translated/Main Line
+            if tag:
+                self.translation_display.insert(tk.END, f"[{tag}] ", "allies_tag")
+            if sender:
+                self.translation_display.insert(tk.END, f"{sender}: ", "sender_tag")
             
-            # Insert the message part. If the original text was translated, show it in bold.
-            if original_text.strip() != translated_text.strip():
-                 self.translation_display.insert(tk.END, parsed["message"], "bold")
+            # If translation happened and is different from original
+            if translated_msg and translated_msg.strip().lower() != original_msg.strip().lower():
+                self.translation_display.insert(tk.END, translated_msg + " (Translation)\n", "bold")
+                
+                # 2. Display Original Line (indented and dimmed)
+                indent = "  "
+                if tag: indent += " " * (len(tag) + 3)
+                if sender: indent += " " * (len(sender) + 2)
+                
+                self.translation_display.insert(tk.END, f"{indent}({original_msg})\n", "original_tag")
             else:
-                self.translation_display.insert(tk.END, parsed["message"], "message_tag") # Use message_tag for consistent color
-            
-            self.translation_display.insert(tk.END, "\n") # Newline after each original entry
+                self.translation_display.insert(tk.END, original_msg + "\n", "message_tag")
         
         # Auto-scroll to the end of the text widget
         self.translation_display.see(tk.END)
@@ -312,38 +337,43 @@ class DotaChatTranslatorApp:
 
     def parse_chat_line(self, chat_line):
         parsed = {
-            "tag": None, # e.g., "Allies" or "Team" etc.
+            "tag": None,
             "sender": None,
-            "message": chat_line.strip() # Default to full line if not parsed
+            "message": chat_line.strip()
         }
 
         temp_line = chat_line.strip()
 
-        # Regex for [Allies] or [Team] or similar tags
-        tag_match = re.match(r"^(?:\[(Allies|Team)\]\s*)?(.*)$", temp_line)
+        # Improved Tag Detection: Allow noise before tag, and match more tag types
+        # Matches [Allies], (Allies), [All], [Team], etc.
+        tag_pattern = r"(?:.*?)([\[\(](Allies|Team|All)[\]\)])\s*(.*)"
+        tag_match = re.search(tag_pattern, temp_line, re.IGNORECASE)
+        
         if tag_match:
-            if tag_match.group(1):
-                parsed["tag"] = tag_match.group(1)
-            temp_line = tag_match.group(2).strip()
+            parsed["tag"] = tag_match.group(2)
+            temp_line = tag_match.group(3).strip()
 
-        # Look for sender: message pattern (last colon)
-        # This needs to be robust against "player icon noise" which is typically at the very start
-        if ':' in temp_line:
-            parts = temp_line.rsplit(':', 1)
+        # Improved Sender Detection:
+        # Look for a colon or semicolon as a separator
+        if ":" in temp_line or ";" in temp_line:
+            split_char = ":" if ":" in temp_line else ";"
+            parts = temp_line.split(split_char, 1)
             potential_sender = parts[0].strip()
             message_part = parts[1].strip()
 
-            # Simple validation for sender: not too long, contains some alphanumeric chars
-            # This helps to filter out OCR noise picked up as 'sender'
-            if 1 < len(potential_sender) < 30 and re.search(r'\w', potential_sender):
+            # Sender validation: allow 1-30 chars, must have at least one alphanumeric
+            if 1 <= len(potential_sender) <= 30 and re.search(r'\w', potential_sender):
                 parsed["sender"] = potential_sender
-                parsed["message"] = message_part
+                # Clean up the message part (remove leading/trailing artifacts)
+                parsed["message"] = message_part.lstrip(":;,. ").strip()
             else:
-                # If sender looks like garbage, treat the whole thing as a message
-                parsed["message"] = chat_line.strip()
+                parsed["message"] = temp_line.lstrip(":;,. ").strip()
         else:
-            # If no colon, assume it's just a message (e.g., system messages)
-            parsed["message"] = chat_line.strip()
+            parsed["message"] = temp_line.lstrip(":;,. ").strip()
+        
+        # Final cleanup for common OCR garbage at start of message
+        # e.g. "© Hello" or "» Hi"
+        parsed["message"] = re.sub(r"^[^\w\s\[\(]+", "", parsed["message"]).strip()
         
         return parsed
 
