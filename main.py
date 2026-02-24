@@ -64,7 +64,7 @@ class DotaChatTranslatorApp:
         # Check for first run to open README
         if self.config.get_first_run():
             self._open_readme_file()
-            self.config.set_first_run(False) # Set to False after opening, so it doesn't open again
+            self.config.set_first_run(False)
 
 
 # =====================================================
@@ -72,23 +72,31 @@ class DotaChatTranslatorApp:
 # =====================================================
 
     def create_widgets(self):
-        self.main_frame = ttk.Frame(self.root, padding=10)
+        # Main container with a Discord-ish background
+        self.root.configure(bg="#313338" if self.current_theme == "Dark" else "#F2F3F5")
+        
+        self.main_frame = ttk.Frame(self.root, padding=15)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Header Area
+        header_frame = ttk.Frame(self.main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 15))
+
         self.notification_label = ttk.Label(
-            self.main_frame,
-            text="",
-            wraplength=380,
+            header_frame,
+            text="Ready",
+            font=(self.current_font_family, 9),
             anchor="w"
         )
-        self.notification_label.pack(fill=tk.X, pady=(0, 10))
+        self.notification_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        button_frame = ttk.Frame(self.main_frame)
-        button_frame.pack(pady=(0, 10))
+        button_frame = ttk.Frame(header_frame)
+        button_frame.pack(side=tk.RIGHT)
 
         ttk.Button(
             button_frame,
-            text="Take Snapshot",
+            text="Snapshot",
+            style="Accent.TButton",
             command=self.take_snapshot
         ).pack(side=tk.LEFT, padx=5)
 
@@ -96,26 +104,46 @@ class DotaChatTranslatorApp:
             button_frame,
             text="Settings",
             command=self.open_settings
-        ).pack(side=tk.LEFT, padx=5)
+        ).pack(side=tk.LEFT)
+
+        # Chat Log Area
+        self.chat_container = ttk.Frame(self.main_frame)
+        self.chat_container.pack(fill=tk.BOTH, expand=True)
+
+        # Add a scrollbar to the text widget
+        chat_scroll = ttk.Scrollbar(self.chat_container)
+        chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.translation_display = tk.Text(
-            self.main_frame,
+            self.chat_container,
             height=15,
             wrap=tk.WORD,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            padx=10,
+            pady=10,
+            yscrollcommand=chat_scroll.set,
+            highlightthickness=0
         )
-        self.translation_display.pack(fill=tk.BOTH, expand=True)
+        self.translation_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        chat_scroll.config(command=self.translation_display.yview)
+
+        # Tags
         self.translation_display.tag_configure("bold", font=(self.current_font_family, self.current_font_size, "bold"))
-        self.translation_display.tag_configure("allies_tag", foreground="green") # Configure green for Allies tag
-        self.translation_display.tag_configure("sender_tag", foreground="yellow") # Configure yellow for sender
-        self.translation_display.tag_configure("message_tag", foreground="white") # Default white for message
-        self.translation_display.tag_configure("original_tag", foreground="#888888") # Dimmed gray for original text
+        self.translation_display.tag_configure("allies_tag", foreground="#23A559") # Discord Green
+        self.translation_display.tag_configure("sender_tag", foreground="#5865F2") # Discord Blurple
+        self.translation_display.tag_configure("message_tag", foreground="white") 
+        self.translation_display.tag_configure("original_tag", foreground="#aaaaaa")
 
-        # New section for displaying the last captured screenshot
-        self.screenshot_frame = ttk.LabelFrame(self.main_frame, text="Last Captured Region", padding=5)
-        self.screenshot_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        # Screenshot Preview - Increased height for better visibility
+        self.preview_container = ttk.Frame(self.main_frame, height=280)
+        self.preview_container.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
+        self.preview_container.pack_propagate(False)
 
-        self.screenshot_label = ttk.Label(self.screenshot_frame, text="No screenshot yet")
+        self.screenshot_frame = ttk.LabelFrame(self.preview_container, text="Preview", padding=5)
+        self.screenshot_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.screenshot_label = ttk.Label(self.screenshot_frame, text="No capture", anchor="center")
         self.screenshot_label.pack(fill=tk.BOTH, expand=True)
 
 
@@ -128,33 +156,87 @@ class DotaChatTranslatorApp:
         self.config.set_theme(theme_name)
 
         style = ttk.Style(self.root)
-
-        if theme_name == "Dark":
+        
+        # Load Forest Theme
+        theme_file = f"forest-{theme_name.lower()}.tcl"
+        theme_path = os.path.join(os.path.dirname(__file__), "theme", theme_file)
+        
+        theme_loaded = False
+        if os.path.exists(theme_path):
+            try:
+                self.root.tk.call("source", theme_path)
+                style.theme_use(f"forest-{theme_name.lower()}")
+                theme_loaded = True
+            except Exception as e:
+                print(f"Error loading forest theme: {e}")
+        
+        if not theme_loaded:
             style.theme_use("clam")
 
+        # Explicitly configure colors to ensure Discord look
+        if theme_name == "Dark":
+            bg_color = "#313338"
+            panel_color = "#2B2D31"
+            text_color = "#DBDEE1"
+            accent_color = "#5865F2"
+            btn_color = "#4E5058"
+            
+            self.root.configure(bg=bg_color)
+            style.configure("TFrame", background=bg_color)
+            style.configure("TLabel", background=bg_color, foreground=text_color)
+            style.configure("TLabelframe", background=bg_color, foreground=text_color)
+            style.configure("TLabelframe.Label", background=bg_color, foreground=text_color)
+            
+            # Button Styling
+            style.configure("TButton", background=btn_color, foreground="white")
+            style.map("TButton", background=[("active", "#6D6F78")])
+            style.configure("Accent.TButton", background=accent_color, foreground="white")
+            style.map("Accent.TButton", background=[("active", "#4752C4")])
+            
             self.translation_display.config(
-                bg="#2b2b2b",
-                fg="white",
+                bg=panel_color,
+                fg=text_color,
                 insertbackground="white"
             )
-            # Update tag colors for dark theme if necessary (e.g. if default foreground is black)
-            self.translation_display.tag_configure("allies_tag", foreground="lightgreen") 
-            self.translation_display.tag_configure("sender_tag", foreground="gold")
-            self.translation_display.tag_configure("message_tag", foreground="white")
-            self.translation_display.tag_configure("original_tag", foreground="#aaaaaa") # Light gray for dark theme
+            self.translation_display.tag_configure("allies_tag", foreground="#23A559") 
+            self.translation_display.tag_configure("sender_tag", foreground="#949CF7")
+            self.translation_display.tag_configure("message_tag", foreground=text_color)
+            self.translation_display.tag_configure("original_tag", foreground="#949BA4")
         else:
-            style.theme_use("default")
-
+            bg_color = "#F2F3F5"
+            panel_color = "#FFFFFF"
+            text_color = "#313338"
+            accent_color = "#5865F2"
+            btn_color = "#E3E5E8"
+            
+            self.root.configure(bg=bg_color)
+            style.configure("TFrame", background=bg_color)
+            style.configure("TLabel", background=bg_color, foreground=text_color)
+            style.configure("TLabelframe", background=bg_color, foreground=text_color)
+            style.configure("TLabelframe.Label", background=bg_color, foreground=text_color)
+            
+            # Button Styling
+            style.configure("TButton", background=btn_color, foreground=text_color)
+            style.map("TButton", background=[("active", "#D1D3D7")])
+            style.configure("Accent.TButton", background=accent_color, foreground="white")
+            style.map("Accent.TButton", background=[("active", "#4752C4")])
+            
             self.translation_display.config(
-                bg="white",
-                fg="black",
+                bg=panel_color,
+                fg=text_color,
                 insertbackground="black"
             )
-            # Update tag colors for light theme if necessary
-            self.translation_display.tag_configure("allies_tag", foreground="darkgreen")
-            self.translation_display.tag_configure("sender_tag", foreground="darkgoldenrod")
-            self.translation_display.tag_configure("message_tag", foreground="black")
-            self.translation_display.tag_configure("original_tag", foreground="#555555") # Dark gray for light theme
+            self.translation_display.tag_configure("allies_tag", foreground="#1A8344")
+            self.translation_display.tag_configure("sender_tag", foreground="#5865F2")
+            self.translation_display.tag_configure("message_tag", foreground=text_color)
+            self.translation_display.tag_configure("original_tag", foreground="#5C5E66")
+        
+        # Style the Accent Button if the theme supports it (Forest does)
+        if theme_loaded:
+            style.configure("Accent.TButton", padding=6)
+        else:
+            # Fallback for clam/default
+            style.configure("Accent.TButton", foreground="white", background="#5865F2")
 
 
 # =====================================================
@@ -304,31 +386,32 @@ class DotaChatTranslatorApp:
 
     def display_last_screenshot(self):
         if self.last_screenshot_pil:
-            # Get the current size of the label to scale the image
-            # Need to use root.update_idletasks() to ensure widget has correct size
             self.root.update_idletasks()
             
-            # Determine maximum display size
-            max_width = self.screenshot_label.winfo_width()
-            max_height = self.screenshot_label.winfo_height()
+            # Use the preview container's size
+            max_width = self.preview_container.winfo_width()
+            max_height = self.preview_container.winfo_height()
 
-            if max_width <= 1 or max_height <= 1: # Handle case where widget is not yet fully rendered or invisible
-                max_width = 400 # Default fallback
-                max_height = 200 # Default fallback
+            if max_width <= 1 or max_height <= 1:
+                max_width = 400
+                max_height = 150 # Fixed height fallback
             
             img_width, img_height = self.last_screenshot_pil.size
             
-            # Calculate aspect ratio to fit within max_width and max_height
+            # Subtract padding for the LabelFrame
+            max_width -= 20
+            max_height -= 30
+            
             ratio = min(max_width / img_width, max_height / img_height)
-            new_width = int(img_width * ratio)
-            new_height = int(img_height * ratio)
+            new_width = max(1, int(img_width * ratio))
+            new_height = max(1, int(img_height * ratio))
             
             resized_image = self.last_screenshot_pil.resize((new_width, new_height), Image.Resampling.LANCZOS)
             self.last_screenshot_tk = ImageTk.PhotoImage(resized_image)
             
             self.screenshot_label.config(image=self.last_screenshot_tk, text="")
         else:
-            self.screenshot_label.config(image="", text="No screenshot yet")
+            self.screenshot_label.config(image="", text="No capture")
 
 
 # =====================================================
@@ -505,7 +588,7 @@ class SettingsWindow(tk.Toplevel):
     ):
         super().__init__(master)
         self.title("Settings")
-        self.geometry("520x550")
+        self.geometry("450x620")
         self.resizable(False, False)
         self.grab_set()
 
@@ -516,104 +599,117 @@ class SettingsWindow(tk.Toplevel):
         self.authorize = authorize_cb
         self.set_hotkey = set_hotkey_cb
 
-        self.main = ttk.Frame(self, padding=15) # Changed to self.main
+        # Match theme background
+        bg_color = "#313338" if current_theme == "Dark" else "#F2F3F5"
+        self.configure(bg=bg_color)
+
+        self.main = ttk.Frame(self, padding=20)
         self.main.pack(fill=tk.BOTH, expand=True)
 
         # Region
-        self.select_region_cb = select_region_cb # Store the callback
+        self.select_region_cb = select_region_cb
 
-        ttk.LabelFrame(self.main, text="Chat Region", padding=10)\
-            .pack(fill=tk.X, pady=8)
+        region_frame = ttk.LabelFrame(self.main, text="Chat Region", padding=10)
+        region_frame.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Button(
-            self.main,
-            text="Select Region",
+            region_frame,
+            text="Select New Region",
+            style="Accent.TButton",
             command=self._on_select_region_button_click
-        ).pack(pady=4)
-
-        # Font
-        font_frame = ttk.LabelFrame(self.main, text="Font", padding=10)
-        font_frame.pack(fill=tk.X, pady=8)
-
-        self.font_family = tk.StringVar(value=current_font)
-        self.font_size = tk.IntVar(value=current_size)
-
-        ttk.Combobox(
-            font_frame,
-            textvariable=self.font_family,
-            values=sorted(font.families()),
-            state="readonly"
-        ).pack(fill=tk.X)
-
-        ttk.Spinbox(
-            font_frame,
-            from_=8,
-            to=36,
-            textvariable=self.font_size,
-            command=self.update_font
-        ).pack(fill=tk.X, pady=4)
-
-        # Theme
-        theme_frame = ttk.LabelFrame(self.main, text="Theme", padding=10)
-        theme_frame.pack(fill=tk.X, pady=8)
-
-        self.theme_var = tk.StringVar(value=current_theme)
-
-        ttk.Combobox(
-            theme_frame,
-            textvariable=self.theme_var,
-            values=["Light", "Dark"],
-            state="readonly"
-        ).pack(fill=tk.X)
-
-        ttk.Button(
-            theme_frame,
-            text="Apply Theme",
-            command=self.update_theme
-        ).pack(pady=4)
-
-        # Google
-        gcp_frame = ttk.LabelFrame(self.main, text="Google Cloud", padding=10)
-        gcp_frame.pack(fill=tk.X, pady=8)
-
-        self.project_id = tk.StringVar(value=config.get_project_id())
-
-        ttk.Entry(
-            gcp_frame,
-            textvariable=self.project_id
-        ).pack(fill=tk.X)
-
-        ttk.Button(
-            gcp_frame,
-            text="Save Project ID",
-            command=self.save_project
-        ).pack(pady=3)
-
-        ttk.Button(
-            gcp_frame,
-            text="Authorize",
-            command=self.authorize
-        ).pack(pady=3)
+        ).pack(fill=tk.X, pady=5)
 
         # Hotkey
-        key_frame = ttk.LabelFrame(self.main, text="Hotkey", padding=10)
-        key_frame.pack(fill=tk.X, pady=8)
+        key_frame = ttk.LabelFrame(self.main, text="Snapshot Hotkey", padding=10)
+        key_frame.pack(fill=tk.X, pady=10)
 
         self.hotkey_var = tk.StringVar(value=current_hotkey)
 
-        entry = ttk.Entry(
+        hotkey_entry = ttk.Entry(
             key_frame,
-            textvariable=self.hotkey_var
+            textvariable=self.hotkey_var,
+            justify="center"
         )
-        entry.pack(fill=tk.X)
-
-        entry.bind("<FocusIn>", self.capture_hotkey)
+        hotkey_entry.pack(fill=tk.X, pady=5)
+        hotkey_entry.bind("<FocusIn>", self.capture_hotkey)
 
         ttk.Button(
             key_frame,
             text="Save Hotkey",
             command=self.save_hotkey
-        ).pack(pady=4)
+        ).pack(fill=tk.X, pady=5)
+
+        # Appearance (Font & Theme)
+        appearance_frame = ttk.LabelFrame(self.main, text="Appearance", padding=10)
+        appearance_frame.pack(fill=tk.X, pady=10)
+
+        # Font Family
+        ttk.Label(appearance_frame, text="Font Family").pack(anchor="w")
+        self.font_family = tk.StringVar(value=current_font)
+        font_combo = ttk.Combobox(
+            appearance_frame,
+            textvariable=self.font_family,
+            values=sorted(font.families()),
+            state="readonly"
+        )
+        font_combo.pack(fill=tk.X, pady=(2, 8))
+        font_combo.bind("<<ComboboxSelected>>", lambda e: self.update_font())
+
+        # Font Size & Theme Row
+        row_frame = ttk.Frame(appearance_frame)
+        row_frame.pack(fill=tk.X)
+
+        size_frame = ttk.Frame(row_frame)
+        size_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Label(size_frame, text="Size").pack(anchor="w")
+        self.font_size = tk.IntVar(value=current_size)
+        ttk.Spinbox(
+            size_frame,
+            from_=8,
+            to=36,
+            textvariable=self.font_size,
+            command=self.update_font
+        ).pack(fill=tk.X)
+
+        theme_inner_frame = ttk.Frame(row_frame)
+        theme_inner_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        ttk.Label(theme_inner_frame, text="Theme").pack(anchor="w")
+        self.theme_var = tk.StringVar(value=current_theme)
+        theme_combo = ttk.Combobox(
+            theme_inner_frame,
+            textvariable=self.theme_var,
+            values=["Light", "Dark"],
+            state="readonly"
+        )
+        theme_combo.pack(fill=tk.X)
+        theme_combo.bind("<<ComboboxSelected>>", lambda e: self.update_theme())
+
+        # Google Cloud
+        gcp_frame = ttk.LabelFrame(self.main, text="Google Cloud API", padding=10)
+        gcp_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Label(gcp_frame, text="Project ID").pack(anchor="w")
+        self.project_id = tk.StringVar(value=config.get_project_id())
+        ttk.Entry(
+            gcp_frame,
+            textvariable=self.project_id
+        ).pack(fill=tk.X, pady=(2, 8))
+
+        btn_row = ttk.Frame(gcp_frame)
+        btn_row.pack(fill=tk.X)
+        
+        ttk.Button(
+            btn_row,
+            text="Save ID",
+            command=self.save_project
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+        ttk.Button(
+            btn_row,
+            text="Authorize",
+            command=self.authorize
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
 
     def _on_select_region_button_click(self):
         # Release the grab on this SettingsWindow before starting region selection
@@ -640,8 +736,18 @@ class SettingsWindow(tk.Toplevel):
 
 
     def update_theme(self):
-        self.set_theme(self.theme_var.get())
-        self.notify("Theme updated.")
+        new_theme = self.theme_var.get()
+        self.set_theme(new_theme)
+        
+        # Update Settings window background live
+        bg_color = "#313338" if new_theme == "Dark" else "#F2F3F5"
+        self.configure(bg=bg_color)
+        
+        # Force redraw of the settings window widgets to pick up style changes
+        # By re-applying the style to the main frame explicitly if needed
+        # but ttk.Style changes should be global.
+        
+        self.notify(f"Theme set to {new_theme}")
 
 
     def save_project(self):
