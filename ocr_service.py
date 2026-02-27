@@ -202,6 +202,6 @@ class OcrService:
         name_strip = cv2.copyMakeBorder(cv2.bitwise_not(cv2.dilate(valid_c[:, max(0, min(ex_x)-20):min(valid_c.shape[1], max(ex_x)+20)], np.ones((2,2), np.uint8))), 20, 20, 40, 40, cv2.BORDER_CONSTANT, value=[255,255,255])
         cv2.imwrite("ocr_debug_sender_pass.png", name_strip)
         
-        name = pytesseract.image_to_string(name_strip, lang='eng+rus+spa+por+chi_sim', config='--oem 1 --psm 6').strip()
+        name = pytesseract.image_to_string(name_strip, lang='eng+rus+spa+por+chi_sim+tur', config='--oem 1 --psm 6').strip()
         name = re.sub(r'[^\w\d\s\._\-\[\]#]', '', name).strip()
         return name if len(name) >= 2 else None
