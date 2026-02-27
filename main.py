@@ -364,6 +364,26 @@ class DotaChatTranslatorApp:
                 sender_name = self.ocr_service.extract_sender_from_line(hsv, y_bounds)
                 if sender_name:
                     parsed["sender"] = sender_name
+                    
+                    # Deduplication Logic: If the message still starts with the sender's name, strip it.
+                    # We check the first few words of the message against the detected sender.
+                    msg_text = parsed["message"]
+                    sender_clean = re.sub(r'\W+', ' ', sender_name.lower()).strip()
+                    sender_parts = set(sender_clean.split())
+                    
+                    msg_words = msg_text.split()
+                    strip_idx = 0
+                    for i in range(min(len(msg_words), 4)): # Check first 4 words
+                        word_clean = re.sub(r'\W+', '', msg_words[i].lower())
+                        if word_clean in sender_parts or any(p in word_clean for p in sender_parts if len(p) > 2):
+                            strip_idx = i + 1
+                        else:
+                            break
+                    
+                    if strip_idx > 0:
+                        parsed["message"] = " ".join(msg_words[strip_idx:]).strip()
+                        # Final cleanup for any leftover colon/dots
+                        parsed["message"] = re.sub(r"^[ :;.,\.]+", "", parsed["message"]).strip()
                 
                 # Translation pass
                 original_msg = parsed["message"]
@@ -404,14 +424,20 @@ class DotaChatTranslatorApp:
             self.translation_display.insert(tk.END, "\t")
 
             # 2. Column 2: Sender
-            if sender:
-                self.translation_display.insert(tk.END, f"{sender}:", "sender_tag")
+            # If the sender pass detected a name, use it. Otherwise, use what the main pass found.
+            display_sender = sender if sender else ""
+            if display_sender:
+                self.translation_display.insert(tk.END, f"{display_sender}:", "sender_tag")
             
             self.translation_display.insert(tk.END, "\t")
 
             # 3. Column 3: Message / Translation
-            # If translation happened and is different from original
-            if translated_msg and translated_msg.strip().lower() != original_msg.strip().lower():
+            # If translation happened and is significantly different from original
+            clean_original = original_msg.strip().lower()
+            clean_translated = translated_msg.strip().lower()
+            
+            # Simple heuristic: If length differs significantly or chars changed
+            if translated_msg and clean_translated != clean_original and len(clean_translated) > 1:
                 self.translation_display.insert(tk.END, translated_msg + " (Translation)\n", "bold")
                 
                 # Display Original Line (indented to the 3rd column)
@@ -487,24 +513,30 @@ class DotaChatTranslatorApp:
         # 1. Tag Detection
         # Matches [Allies], (Allies), [All], [Team], [Squelched], etc.
         # Allowing for slight OCR errors like (Allies] or [Alies]
-        tag_pattern = r"^[\[\(](Allies|Team|All|Squelch\w*|Party)[\]\)]\s*(.*)"
+        tag_pattern = r"^[\[\(]?(Allies|Team|All|Squelch\w*|Party)[\]\)]?\s*(.*)"
         tag_match = re.search(tag_pattern, temp_line, re.IGNORECASE)
         
         if tag_match:
             parsed["tag"] = tag_match.group(1).capitalize()
+            # If tag was missing brackets, we still count it but clean the text
             temp_line = tag_match.group(2).strip()
         else:
-            # Fallback for even noisier tags: look for brackets anywhere near start
-            loose_tag_match = re.search(r"[\[\(](Allies|All|Team|Party)[\]\)]", temp_line[:15], re.IGNORECASE)
+            # Fallback for even noisier tags: look for the words anywhere near start
+            loose_tag_match = re.search(r"(Allies|All|Team|Party)", temp_line[:15], re.IGNORECASE)
             if loose_tag_match:
                 parsed["tag"] = loose_tag_match.group(1).capitalize()
-                # Remove the tag from the temp_line
-                temp_line = temp_line.replace(loose_tag_match.group(0), "").strip()
+                # Remove the tag word and any surrounding non-alnum noise
+                temp_line = re.sub(r"^[^\w\d]*" + re.escape(loose_tag_match.group(0)) + r"[^\w\d]*", "", temp_line, flags=re.IGNORECASE).strip()
 
         # 2. Sender Detection
         # Case A: Colon, Semicolon, or common OCR misreads (like . or i at the end of a word)
         # We look for a colon or semicolon within the first 25 characters
+        # Added support for misread colons as dots if they follow a likely name
         sender_match = re.search(r"^([^:;]{1,25})[:;](.*)", temp_line)
+        if not sender_match:
+            # Fallback: look for a space and a dot (common misread of ' :')
+            sender_match = re.search(r"^([^:;]{1,25})\s\.(.*)", temp_line)
+
         if sender_match:
             potential_sender = sender_match.group(1).strip()
             message_part = sender_match.group(2).strip()
@@ -540,12 +572,15 @@ class DotaChatTranslatorApp:
                 else:
                     parsed["message"] = temp_line
 
-        # Final cleanup for common OCR garbage at start of message
-        parsed["message"] = parsed["message"].lstrip(":;,. ").strip()
-        # ONLY remove leading symbols that are definitely NOT language characters (like ©, ®, », etc)
-        # We keep all alphanumeric (including non-English) and basic brackets/punctuation.
-        parsed["message"] = re.sub(r"^[^\w\d\s\[\(]+", "", parsed["message"]).strip()
+        # Final surgical cleanup
+        # We only want to remove leading colons/semicolons and surrounding whitespace
+        # that Tesseract sometimes orphans at the start of the message part.
+        parsed["message"] = re.sub(r"^[ :;.,\.]+", "", parsed["message"]).strip()
         
+        # If the resulting message is just one char or nonsense, discard it
+        if len(parsed["message"]) < 2 and not any(c.isalnum() for c in parsed["message"]):
+             parsed["message"] = ""
+
         return parsed
 
 

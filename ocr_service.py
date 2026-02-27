@@ -13,23 +13,22 @@ class OcrService:
     def __init__(self):
         # Precise HSV ranges for the 10 Dota 2 player colors
         self.dota_player_colors = [
-            ((100, 120, 50), (130, 255, 255)), # Blue
-            ((80, 120, 50), (105, 255, 255)),  # Teal
-            ((130, 120, 50), (160, 255, 255)), # Purple
-            ((22, 120, 50), (40, 255, 255)),   # Yellow
-            ((5, 120, 50), (22, 255, 255)),    # Orange
-            ((140, 100, 50), (175, 255, 255)), # Pink
-            ((35, 100, 50), (65, 255, 255)),   # Olive/Lime
-            ((85, 100, 50), (115, 255, 255)),  # Light Blue
-            ((55, 80, 40), (85, 255, 255)),    # Dark Green
-            ((0, 100, 40), (15, 255, 255)),    # Brown
+            ((100, 150, 50), (130, 255, 255)), # Blue
+            ((80, 150, 50), (100, 255, 255)),  # Teal
+            ((130, 150, 50), (160, 255, 255)), # Purple
+            ((22, 150, 50), (40, 255, 255)),   # Yellow
+            ((5, 150, 50), (22, 255, 255)),    # Orange
+            ((140, 150, 50), (175, 255, 255)), # Pink
+            ((35, 150, 50), (60, 255, 255)),   # Olive/Lime
+            ((85, 150, 50), (115, 255, 255)),  # Light Blue
+            ((55, 100, 40), (85, 255, 255)),   # Dark Green
+            ((0, 150, 40), (15, 255, 255)),    # Brown
         ]
 
     def get_color_mask(self, hsv):
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
         for (lower, upper) in self.dota_player_colors:
-            # Enforce saturation for name pass
-            low = np.array([lower[0], 120, lower[2]])
+            low = np.array([lower[0], 150, lower[2]]) # S > 150
             mask = cv2.bitwise_or(mask, cv2.inRange(hsv, low, np.array(upper)))
         return mask
 
@@ -40,17 +39,14 @@ class OcrService:
         return cv2.bitwise_and(v_mask, s_mask)
 
     def denoise_ui_elements(self, combined_mask, shadow_mask):
-        """
-        Validates all UI elements (Tag, Name, Msg) together.
-        Ensures neighbors exist across color boundaries.
-        """
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(combined_mask, connectivity=8)
-        shadow_field = cv2.dilate(shadow_mask, np.ones((5, 5), np.uint8), iterations=1)
+        kernel_shadow = np.ones((5, 5), np.uint8)
+        shadow_field = cv2.dilate(shadow_mask, kernel_shadow, iterations=1)
         
         candidates = []
         for i in range(1, num_labels):
             x, y, w, h, area = stats[i]
-            if not (4 < h < 85 and area > 2): continue
+            if not (4 < h < 85 and area > 2): continue # Inclusive geometry
             
             # Shadow Check
             blob_roi = (labels[y:y+h, x:x+w] == i).astype(np.uint8) * 255
@@ -62,30 +58,40 @@ class OcrService:
             x1, y1, w1, h1, _ = stats[i]
             y1_bottom = y1 + h1
             
-            # Check for ANY neighbor (color or white) on the same baseline
-            for j in candidates:
-                if i == j: continue
-                y2_bottom = stats[j, cv2.CC_STAT_TOP] + stats[j, cv2.CC_STAT_HEIGHT]
-                if abs(y1_bottom - y2_bottom) < 8: # Baseline tolerance
-                    x2 = stats[j, cv2.CC_STAT_LEFT]
-                    w2 = stats[j, cv2.CC_STAT_WIDTH]
-                    if min(abs(x1 - (x2 + w2)), abs(x2 - (x1 + w1))) < 120: 
-                        anchors.add(i)
-                        break
+            # Anchor: Requires a minimum height/area. No solidity filter.
+            if h1 > 10 and stats[i, cv2.CC_STAT_AREA] > 8: # Relaxed Anchor Rules
+                # Explicitly add brackets as anchors if they fit geometric profile
+                if 2 < w1 < 10 and h1 > 20: # Tall and thin (like [ or ])
+                    anchors.add(i)
+                    continue
+
+                for j in candidates:
+                    if i == j: continue
+                    y2_bottom = stats[j, cv2.CC_STAT_TOP] + stats[j, cv2.CC_STAT_HEIGHT]
+                    if abs(y1_bottom - y2_bottom) < 10: 
+                        if min(abs(x1 - (stats[j,0]+stats[j,2])), abs(stats[j,0] - (x1+w1))) < 150: 
+                            anchors.add(i)
+                            break
 
         clean_mask = np.zeros_like(combined_mask)
         for i in candidates:
             if i in anchors:
                 clean_mask[labels == i] = 255
-            else:
-                # Keep if very close to an anchor (handles dots/commas)
-                x1, y1, w1, h1, _ = stats[i]
-                for a_idx in anchors:
-                    ax, ay, aw, ah, _ = stats[a_idx]
-                    if abs(y1 - ay) < 40 and min(abs(x1 - (ax + aw)), abs(ax - (x1 + w1))) < 15:
+                continue
+            x1, y1, w1, h1, _ = stats[i]
+            for a_idx in anchors:
+                ax, ay, aw, ah, _ = stats[a_idx]
+                if abs(y1 - ay) < 40: 
+                    if min(abs(x1 - (ax + aw)), abs(ax - (x1 + w1))) < 20:
                         clean_mask[labels == i] = 255
                         break
+                        
         return clean_mask
+
+    def preprocess_image(self, pil_image):
+        width, height = pil_image.size
+        img = pil_image.resize((width * 3, height * 3), Image.Resampling.LANCZOS)
+        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2HSV)
 
     def extract_text_from_image(self, pil_image):
         pil_image.save("ocr_debug_original.png")
@@ -95,50 +101,69 @@ class OcrService:
             _, shadow_mask = cv2.threshold(v_chan, 60, 255, cv2.THRESH_BINARY_INV)
             
             white_mask = self.get_white_mask(hsv)
-            color_mask = self.get_color_mask(hsv)
-            combined = cv2.bitwise_or(white_mask, color_mask)
+            color_mask_for_validation = self.get_color_mask(hsv) 
             
-            # Denoise all elements together to preserve first/last words
+            # Combined mask for denoising includes white and player colors
+            combined = cv2.bitwise_or(white_mask, color_mask_for_validation)
+            
             validated_combined = self.denoise_ui_elements(combined, shadow_mask)
             
-            # But for the Message pass, we only want the WHITE pixels
-            final_white_mask = cv2.bitwise_and(validated_combined, white_mask)
+            # Use the full validated mask for the main pass
+            final_msg_mask = validated_combined 
             
-            kernel = np.ones((2, 2), np.uint8)
-            proc_mask = cv2.dilate(final_white_mask, kernel, iterations=1)
+            proc_mask = cv2.dilate(final_msg_mask, np.ones((2, 2), np.uint8), iterations=1)
             final_mask = cv2.bitwise_not(proc_mask)
             cv2.imwrite("ocr_debug_final_mask.png", final_mask)
 
-            data = pytesseract.image_to_data(final_mask, lang='eng+rus+spa+por+chi_sim', config='--psm 6', output_type=Output.DICT)
+            data = pytesseract.image_to_data(final_mask, lang='eng+rus+spa+por+chi_sim', config='--oem 1 --psm 6', output_type=Output.DICT)
 
-            # Group by BASELINE (Bottom Y)
-            lines = defaultdict(list)
+            temp_lines = defaultdict(list)
             for i in range(len(data['text'])):
-                if int(data['conf'][i]) > 20:
-                    text = data['text'][i].strip()
-                    if text:
-                        # Use bottom coordinate for grouping
-                        y_bottom = data['top'][i] + data['height'][i]
-                        matched_y = None
-                        for ly in lines.keys():
-                            if abs(ly - y_bottom) < 15: # 15px baseline tolerance
-                                matched_y = ly
-                                break
-                        if matched_y is None:
-                            lines[y_bottom].append(i)
-                        else:
-                            lines[matched_y].append(i)
+                conf = int(data['conf'][i])
+                text = data['text'][i].strip()
+                # Use a slightly higher confidence for the main pass to reduce hallucinations
+                if conf > 20 and text:
+                    y_center = data['top'][i] + (data['height'][i] // 2)
+                    matched_y = None
+                    for ly_center in temp_lines.keys():
+                        if abs(ly_center - y_center) < 25: # Group by vertical center proximity
+                            matched_y = ly_center
+                            break
+                    if matched_y is None:
+                        temp_lines[y_center].append(i)
+                    else:
+                        temp_lines[matched_y].append(i)
 
             results = []
-            for y in sorted(lines.keys()):
-                indices = lines[y]
+            for y_center in sorted(temp_lines.keys()):
+                indices = temp_lines[y_center]
                 indices.sort(key=lambda idx: data['left'][idx])
                 line_text = " ".join([data['text'][idx] for idx in indices])
+                
                 y_min = min(data['top'][idx] for idx in indices)
                 y_max = max(data['top'][idx] + data['height'][idx] for idx in indices)
                 
-                if line_text and any(c.isalnum() for c in line_text):
-                    cleaned = re.sub(r'[§|\\_~`©®°¶†‡»«#@]', '', line_text).strip()
+                # Filter noise: Must have a decent density of alphanumeric characters
+                alnum_count = sum(1 for c in line_text if c.isalnum())
+                if alnum_count < 2: continue # Ignore lines with < 2 alnum chars
+                if len(line_text) < 4 and alnum_count < 3: continue # Ignore very short non-dense lines
+
+                # Deduplication: If this line heavily overlaps the previous one, skip it
+                if results:
+                    prev_min, prev_max = results[-1]["y_bounds"]
+                    overlap = min(y_max, prev_max) - max(y_min, prev_min)
+                    line_height = y_max - y_min
+                    if overlap > line_height * 0.5:
+                        # If overlap is high, keep the one with more text
+                        if len(line_text) > len(results[-1]["text"]):
+                            results.pop()
+                        else:
+                            continue
+
+                if line_text:
+                    cleaned = line_text.strip()
+                    cleaned = re.sub(r'[\s]+', ' ', cleaned).strip()
+                    
                     if len(cleaned) >= 2:
                         results.append({
                             "text": cleaned,
@@ -150,15 +175,11 @@ class OcrService:
             print(f"Error: {e}")
             return []
 
-    def preprocess_image(self, pil_image):
-        width, height = pil_image.size
-        img = pil_image.resize((width * 2, height * 2), Image.Resampling.LANCZOS)
-        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2HSV)
 
     def extract_sender_from_line(self, hsv, y_bounds):
         y1, y2 = y_bounds
         y1_v, y2_v = max(0, y1-10), min(hsv.shape[0], y2+10)
-        x_limit = int(hsv.shape[1] * 0.4)
+        x_limit = int(hsv.shape[1] * 0.45)
         line_hsv = hsv[y1_v:y2_v, 0:x_limit]
         
         c_mask = self.get_color_mask(line_hsv)
@@ -171,13 +192,16 @@ class OcrService:
         ex_x = []
         for i in range(1, num):
             x, y, w, h, area = stats[i]
-            if 8 < h < 80 and area > 4:
-                if cv2.countNonZero(cv2.bitwise_and((labels[y:y+h, x:x+w]==i).astype(np.uint8)*255, s_field[y:y+h, x:x+w])) > 0:
+            if 8 < h < 120 and area > 4: # Adjusted for 3x scale
+                blob_roi = (labels[y:y+h, x:x+w]==i).astype(np.uint8)*255
+                if cv2.countNonZero(cv2.bitwise_and(blob_roi, s_field[y:y+h, x:x+w])) > 0:
                     valid_c[labels==i] = 255
                     ex_x.extend([x, x+w])
 
         if not ex_x: return None
-        name_strip = cv2.copyMakeBorder(cv2.bitwise_not(cv2.dilate(valid_c[:, max(0, min(ex_x)-20):min(valid_c.shape[1], max(ex_x)+20)], np.ones((2,2), np.uint8))), 15, 15, 30, 30, cv2.BORDER_CONSTANT, value=[255,255,255])
+        name_strip = cv2.copyMakeBorder(cv2.bitwise_not(cv2.dilate(valid_c[:, max(0, min(ex_x)-20):min(valid_c.shape[1], max(ex_x)+20)], np.ones((2,2), np.uint8))), 20, 20, 40, 40, cv2.BORDER_CONSTANT, value=[255,255,255])
         cv2.imwrite("ocr_debug_sender_pass.png", name_strip)
-        name = pytesseract.image_to_string(name_strip, lang='eng+rus+spa+por+chi_sim', config='--psm 7').strip()
-        return re.sub(r'[^\w\d\s\._\-\[\]#]', '', name).strip() if len(name) >= 2 else None
+        
+        name = pytesseract.image_to_string(name_strip, lang='eng+rus+spa+por+chi_sim', config='--oem 1 --psm 6').strip()
+        name = re.sub(r'[^\w\d\s\._\-\[\]#]', '', name).strip()
+        return name if len(name) >= 2 else None
