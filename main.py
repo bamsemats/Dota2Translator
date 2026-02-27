@@ -25,11 +25,13 @@ class DotaChatTranslatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Dota 2 Chat Translator")
-        self.root.geometry("420x720") # Adjusted geometry to accommodate the image panel
+        self.root.geometry("1280x960") # Increased by 25% (1024x768 -> 1280x960)
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.config = AppConfig()
+        
+        self.resize_timer = None # Timer for debouncing resizes
 
         # Load config
         self.chat_region = self.config.get_chat_region()
@@ -45,6 +47,9 @@ class DotaChatTranslatorApp:
 
         self.ocr_service = OcrService() # No longer needs project_id
         self.translation_service = TranslationService(self.google_cloud_project_id)
+        
+        # Memory of seen senders to help parse colon-less lines
+        self.sender_registry = set() 
 
         # Hotkey listener
         self.keybinding_service = KeybindingService(self.take_snapshot, self.hotkey_str)
@@ -65,6 +70,21 @@ class DotaChatTranslatorApp:
         if self.config.get_first_run():
             self._open_readme_file()
             self.config.set_first_run(False)
+
+    def register_sender(self, sender):
+        """
+        Adds a sender to the registry, with a cap on the total number of senders
+        to prevent memory issues over long sessions.
+        """
+        if not sender:
+            return
+            
+        sender_lower = sender.lower()
+        if len(self.sender_registry) > 100:
+            # Clear if it gets too large, it will rebuild from new chat lines
+            self.sender_registry.clear()
+            
+        self.sender_registry.add(sender_lower)
 
 
 # =====================================================
@@ -123,7 +143,8 @@ class DotaChatTranslatorApp:
             padx=10,
             pady=10,
             yscrollcommand=chat_scroll.set,
-            highlightthickness=0
+            highlightthickness=0,
+            tabs=(80, 200) # Defined tab stops for columns
         )
         self.translation_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         chat_scroll.config(command=self.translation_display.yview)
@@ -136,8 +157,8 @@ class DotaChatTranslatorApp:
         self.translation_display.tag_configure("original_tag", foreground="#aaaaaa")
 
         # Screenshot Preview - Increased height for better visibility
-        self.preview_container = ttk.Frame(self.main_frame, height=280)
-        self.preview_container.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
+        self.preview_container = ttk.Frame(self.main_frame, height=400)
+        self.preview_container.pack(fill=tk.BOTH, expand=False, pady=(15, 0))
         self.preview_container.pack_propagate(False)
 
         self.screenshot_frame = ttk.LabelFrame(self.preview_container, text="Preview", padding=5)
@@ -145,6 +166,9 @@ class DotaChatTranslatorApp:
 
         self.screenshot_label = ttk.Label(self.screenshot_frame, text="No capture", anchor="center")
         self.screenshot_label.pack(fill=tk.BOTH, expand=True)
+
+        # Bind resize event to update preview scaling
+        self.preview_container.bind("<Configure>", self.on_resize)
 
 
 # =====================================================
@@ -250,6 +274,14 @@ class DotaChatTranslatorApp:
         new_font = font.Font(family=family, size=size)
 
         self.translation_display.config(font=new_font)
+        
+        # Dynamically update tab stops based on font size
+        # We use a character-width measurement for consistency
+        avg_char_width = new_font.measure("0")
+        tab1 = avg_char_width * 11 # Approx 11 chars for [Allies] tag
+        tab2 = avg_char_width * 30 # Approx 30 chars for sender (total)
+        self.translation_display.config(tabs=(tab1, tab2))
+
         self.translation_display.tag_configure("bold", font=(family, size, "bold")) # Update bold tag
 
 
@@ -306,53 +338,57 @@ class DotaChatTranslatorApp:
                 return
 
             self.last_screenshot_pil = screenshot # Store the PIL Image
+            
+            # Update the UI with the screenshot preview
+            self.root.after(0, self.display_last_screenshot)
 
-            extracted_lines = self.ocr_service.extract_text_from_image(screenshot)
+            # --- PASS 1: Get Message Lines (White text only) ---
+            extracted_data = self.ocr_service.extract_text_from_image(screenshot)
 
             processed_messages = []
 
-            for line in extracted_lines:
-                text = line["text"]
+            for data in extracted_data:
+                text = data["text"]
+                y_bounds = data["y_bounds"]
+                hsv = data["full_hsv"]
+
+                # Detect Tag and Message from the white text
                 parsed = self.parse_chat_line(text)
                 
-                # --- Multi-line Joining Logic ---
-                # Only join if:
-                # 1. This line has NO tag and NO sender
-                # 2. There is a previous message
-                # 3. The previous message had a sender (wasn't just noise)
-                # 4. The current line doesn't look like a new message (doesn't start with typical patterns)
-                if not parsed["tag"] and not parsed["sender"] and processed_messages:
-                    prev_msg = processed_messages[-1]
-                    if prev_msg["sender"]:
-                        # Append to previous message instead of adding new
-                        prev_msg["message"] += " " + parsed["message"]
-                        continue 
+                # If no tag found, default to 'All'
+                if not parsed["tag"]:
+                    parsed["tag"] = "All"
+
+                # --- PASS 2: Get Sender Name (Colored text only) ---
+                # Targeted search within the same vertical bounds
+                sender_name = self.ocr_service.extract_sender_from_line(hsv, y_bounds)
+                if sender_name:
+                    parsed["sender"] = sender_name
+                
+                # Translation pass
+                original_msg = parsed["message"]
+                if original_msg:
+                    _, translated_msg = self.translation_service.translate_text(original_msg, "und")
+                    parsed["translated_message"] = translated_msg
+                else:
+                    parsed["translated_message"] = ""
 
                 processed_messages.append(parsed)
 
-            # Translation pass on the final structured messages
-            for msg_obj in processed_messages:
-                if msg_obj["message"]:
-                    original_msg = msg_obj["message"]
-                    # We don't know the exact lang for joined lines, use "und"
-                    _, translated_msg = self.translation_service.translate_text(original_msg, "und")
-                    msg_obj["translated_message"] = translated_msg
-                else:
-                    msg_obj["translated_message"] = ""
-
             self.root.after(0, lambda: self.display_translation(processed_messages))
-            self.root.after(0, self.display_last_screenshot) # Call the method to display the screenshot
 
         except Exception as e:
             self.safe_notify(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
     def display_translation(self, processed_messages):
         self.translation_display.config(state=tk.NORMAL)
         
-        # Add a newline only if there's already content, to separate new entries
+        # Add a newline only if there's already content
         if self.translation_display.index(tk.END) != "1.0":
-            self.translation_display.insert(tk.END, "\n\n") # Double newline for better separation
+            self.translation_display.insert(tk.END, "\n")
         
         for msg_obj in processed_messages:
             tag = msg_obj["tag"]
@@ -360,55 +396,74 @@ class DotaChatTranslatorApp:
             original_msg = msg_obj["message"]
             translated_msg = msg_obj["translated_message"]
 
-            # 1. Display Translated/Main Line
+            # 1. Column 1: Tag
             if tag:
-                self.translation_display.insert(tk.END, f"[{tag}] ", "allies_tag")
-            if sender:
-                self.translation_display.insert(tk.END, f"{sender}: ", "sender_tag")
+                tag_str = f"[{tag}]"
+                self.translation_display.insert(tk.END, tag_str, "allies_tag")
             
+            self.translation_display.insert(tk.END, "\t")
+
+            # 2. Column 2: Sender
+            if sender:
+                self.translation_display.insert(tk.END, f"{sender}:", "sender_tag")
+            
+            self.translation_display.insert(tk.END, "\t")
+
+            # 3. Column 3: Message / Translation
             # If translation happened and is different from original
             if translated_msg and translated_msg.strip().lower() != original_msg.strip().lower():
                 self.translation_display.insert(tk.END, translated_msg + " (Translation)\n", "bold")
                 
-                # 2. Display Original Line (indented and dimmed)
-                indent = "  "
-                if tag: indent += " " * (len(tag) + 3)
-                if sender: indent += " " * (len(sender) + 2)
-                
-                self.translation_display.insert(tk.END, f"{indent}({original_msg})\n", "original_tag")
+                # Display Original Line (indented to the 3rd column)
+                self.translation_display.insert(tk.END, f"\t\t({original_msg})\n", "original_tag")
             else:
                 self.translation_display.insert(tk.END, original_msg + "\n", "message_tag")
         
-        # Auto-scroll to the end of the text widget
+        # Auto-scroll to the end
         self.translation_display.see(tk.END)
         self.translation_display.config(state=tk.DISABLED)
 
         self.update_notification("Done.")
 
 
+    def on_resize(self, event):
+        """
+        Handles dynamic resizing of the preview image when the window changes.
+        Uses debouncing to avoid excessive processing during rapid drags.
+        """
+        # Only handle Configure events for the preview_container itself, not its children
+        if event.widget != self.preview_container:
+            return
+
+        if self.resize_timer:
+            self.root.after_cancel(self.resize_timer)
+        
+        self.resize_timer = self.root.after(100, self.display_last_screenshot)
+
     def display_last_screenshot(self):
         if self.last_screenshot_pil:
-            self.root.update_idletasks()
-            
-            # Use the preview container's size
+            # Use the actual widget size if it's already rendered
             max_width = self.preview_container.winfo_width()
             max_height = self.preview_container.winfo_height()
 
-            if max_width <= 1 or max_height <= 1:
-                max_width = 400
-                max_height = 150 # Fixed height fallback
+            # Fallbacks for initialization or tiny window
+            if max_width < 50 or max_height < 50:
+                max_width = 1000
+                max_height = 380
             
             img_width, img_height = self.last_screenshot_pil.size
             
-            # Subtract padding for the LabelFrame
-            max_width -= 20
-            max_height -= 30
+            # Pad the area to fit nicely inside the frame
+            target_w = max_width - 30
+            target_h = max_height - 50
             
-            ratio = min(max_width / img_width, max_height / img_height)
+            ratio = min(target_w / img_width, target_h / img_height)
             new_width = max(1, int(img_width * ratio))
             new_height = max(1, int(img_height * ratio))
             
-            resized_image = self.last_screenshot_pil.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            # Use NEAREST for upscaling text to keep it crisp
+            resampling = Image.Resampling.NEAREST if ratio > 1 else Image.Resampling.LANCZOS
+            resized_image = self.last_screenshot_pil.resize((new_width, new_height), resampling)
             self.last_screenshot_tk = ImageTk.PhotoImage(resized_image)
             
             self.screenshot_label.config(image=self.last_screenshot_tk, text="")
@@ -430,57 +485,66 @@ class DotaChatTranslatorApp:
         temp_line = chat_line.strip()
 
         # 1. Tag Detection
-        # Matches [Allies], (Allies), [All], [Team], etc.
-        tag_pattern = r"(?:.*?)([\[\(](Allies|Team|All)[\]\)])\s*(.*)"
+        # Matches [Allies], (Allies), [All], [Team], [Squelched], etc.
+        # Allowing for slight OCR errors like (Allies] or [Alies]
+        tag_pattern = r"^[\[\(](Allies|Team|All|Squelch\w*|Party)[\]\)]\s*(.*)"
         tag_match = re.search(tag_pattern, temp_line, re.IGNORECASE)
         
         if tag_match:
-            parsed["tag"] = tag_match.group(2)
-            temp_line = tag_match.group(3).strip()
+            parsed["tag"] = tag_match.group(1).capitalize()
+            temp_line = tag_match.group(2).strip()
+        else:
+            # Fallback for even noisier tags: look for brackets anywhere near start
+            loose_tag_match = re.search(r"[\[\(](Allies|All|Team|Party)[\]\)]", temp_line[:15], re.IGNORECASE)
+            if loose_tag_match:
+                parsed["tag"] = loose_tag_match.group(1).capitalize()
+                # Remove the tag from the temp_line
+                temp_line = temp_line.replace(loose_tag_match.group(0), "").strip()
 
         # 2. Sender Detection
-        # Case A: Colon or Semicolon present (Standard)
-        if ":" in temp_line or ";" in temp_line:
-            split_char = ":" if ":" in temp_line else ";"
-            parts = temp_line.split(split_char, 1)
-            potential_sender = parts[0].strip()
-            message_part = parts[1].strip()
+        # Case A: Colon, Semicolon, or common OCR misreads (like . or i at the end of a word)
+        # We look for a colon or semicolon within the first 25 characters
+        sender_match = re.search(r"^([^:;]{1,25})[:;](.*)", temp_line)
+        if sender_match:
+            potential_sender = sender_match.group(1).strip()
+            message_part = sender_match.group(2).strip()
 
-            # Validate sender (1-30 chars, contains alphanumeric)
-            if 1 <= len(potential_sender) <= 30 and re.search(r'\w', potential_sender):
+            # Validate sender: at least 1 alphanumeric character
+            if any(c.isalnum() for c in potential_sender):
                 parsed["sender"] = potential_sender
                 parsed["message"] = message_part
+                if len(potential_sender) > 2:
+                    self.register_sender(potential_sender)
             else:
                 parsed["message"] = temp_line
         
-        # Case B: No colon, but we have a tag - first word might be the sender
-        elif parsed["tag"] and temp_line:
-            # If there's a space, split it. If not, the whole thing might be the sender or message.
-            if " " in temp_line:
-                parts = temp_line.split(" ", 1)
-                potential_sender = parts[0].strip()
-                # If the first word looks like a name (no weird punctuation), assume it's a sender
-                if re.match(r'^\w+$', potential_sender):
-                    parsed["sender"] = potential_sender
-                    parsed["message"] = parts[1].strip()
-                else:
-                    parsed["message"] = temp_line
-            else:
-                # Only one word after tag. If it's short, could be a sender with an empty message.
-                if 1 <= len(temp_line) <= 15 and re.match(r'^\w+$', temp_line):
-                    parsed["sender"] = temp_line
-                    parsed["message"] = ""
-                else:
-                    parsed["message"] = temp_line
-        
-        # Case C: No tag, no colon. Likely a system message or a continuation.
+        # Case B: No colon, check against registry or look for first word
         else:
-            parsed["message"] = temp_line
+            words = temp_line.split(" ")
+            if words:
+                first_word = words[0].rstrip(":;,. ").strip()
+                if first_word.lower() in self.sender_registry:
+                    parsed["sender"] = first_word
+                    parsed["message"] = " ".join(words[1:]).strip()
+                
+                # Case C: No colon, but we have a tag - first word is VERY likely the sender
+                elif parsed["tag"] and len(words) > 1:
+                    potential_sender = words[0].strip()
+                    # If it's a plausible name length and not just punctuation
+                    if 1 <= len(potential_sender) <= 20 and any(c.isalnum() for c in potential_sender):
+                        parsed["sender"] = potential_sender
+                        parsed["message"] = " ".join(words[1:]).strip()
+                        self.register_sender(potential_sender)
+                    else:
+                        parsed["message"] = temp_line
+                else:
+                    parsed["message"] = temp_line
 
         # Final cleanup for common OCR garbage at start of message
-        # e.g. "© Hello" or "» Hi" or ": "
         parsed["message"] = parsed["message"].lstrip(":;,. ").strip()
-        parsed["message"] = re.sub(r"^[^\w\s\[\(]+", "", parsed["message"]).strip()
+        # ONLY remove leading symbols that are definitely NOT language characters (like ©, ®, », etc)
+        # We keep all alphanumeric (including non-English) and basic brackets/punctuation.
+        parsed["message"] = re.sub(r"^[^\w\d\s\[\(]+", "", parsed["message"]).strip()
         
         return parsed
 

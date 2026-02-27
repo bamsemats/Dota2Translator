@@ -78,6 +78,6 @@ python main.py
    - In the app's settings, click "Select Region".
    - Your screen will dim. Click and drag to draw a box around the area where chat messages appear in Dota 2.
 3. **Translate:**
-   - Once the region is set and Google Cloud is authorized, you can press your configured hotkey (default is `<ctrl>+<alt>+z`) to capture the chat region.
+   - Once the region is set and Google Cloud is authorized, you can press your configured hotkey (default is `<f8>`) to capture the chat region.
    - The application will process the image, and any translated text will appear in the main window.
 4. **Settings:** You can change the hotkey, theme, and text font size from the Settings menu.
