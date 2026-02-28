@@ -30,6 +30,9 @@ class AppConfig:
         self.config['UI']['font_size'] = "14"
         self.config['UI']['theme'] = "Light"
         self.config['General']['hotkey'] = "<f8>" # Default hotkey
+        self.config['General']['target_lang'] = "en" # Default target language
+        self.config['General']['ocr_langs'] = "eng,rus,spa,por,chi_sim" # Back to eng priority
+        self.config['General']['ocr_dashboard'] = "eng,rus,spa,por,chi_sim,tur,swe" 
         self.config['GoogleCloud']['project_id'] = ""
         self.config['General']['first_run'] = "True" # New: Flag for first run
 
@@ -47,6 +50,24 @@ class AppConfig:
         self._save_config()
 
     # --- Specific getters/setters for convenience ---
+    def get_target_lang(self):
+        return self.get('General', 'target_lang', "en")
+
+    def set_target_lang(self, lang):
+        self.set('General', 'target_lang', lang)
+
+    def get_ocr_langs(self):
+        return self.get('General', 'ocr_langs', "eng,rus,spa,por,chi_sim,tur,swe")
+
+    def set_ocr_langs(self, langs_str):
+        self.set('General', 'ocr_langs', langs_str)
+
+    def get_ocr_dashboard(self):
+        return self.get('General', 'ocr_dashboard', "eng,rus,spa,por,chi_sim,tur,swe")
+
+    def set_ocr_dashboard(self, dashboard_str):
+        self.set('General', 'ocr_dashboard', dashboard_str)
+
     def get_chat_region(self):
         region_str = self.get('General', 'chat_region')
         if region_str:

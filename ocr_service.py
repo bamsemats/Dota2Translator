@@ -10,7 +10,8 @@ from collections import defaultdict
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 class OcrService:
-    def __init__(self):
+    def __init__(self, ocr_langs="eng+rus+spa+por+chi_sim+tur"):
+        self.ocr_langs = ocr_langs
         # Precise HSV ranges for the 10 Dota 2 player colors
         self.dota_player_colors = [
             ((100, 150, 50), (130, 255, 255)), # Blue
@@ -24,6 +25,10 @@ class OcrService:
             ((55, 100, 40), (85, 255, 255)),   # Dark Green
             ((0, 150, 40), (15, 255, 255)),    # Brown
         ]
+
+    def set_ocr_langs(self, langs_str):
+        """Update the Tesseract language string (e.g., 'eng+rus')."""
+        self.ocr_langs = langs_str.replace(",", "+")
 
     def get_color_mask(self, hsv):
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -90,8 +95,17 @@ class OcrService:
 
     def preprocess_image(self, pil_image):
         width, height = pil_image.size
-        img = pil_image.resize((width * 3, height * 3), Image.Resampling.LANCZOS)
-        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2HSV)
+        # Resize to 3x
+        img_np = np.array(pil_image.resize((width * 3, height * 3), Image.Resampling.LANCZOS))
+        
+        # Convert to BGR for sharpening
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        
+        # Gaussian Unsharp Mask (2.0 strength, 1.0 sigma)
+        gaussian = cv2.GaussianBlur(img_bgr, (0, 0), 1.0)
+        sharpened = cv2.addWeighted(img_bgr, 2.0, gaussian, -1.0, 0)
+        
+        return cv2.cvtColor(sharpened, cv2.COLOR_BGR2HSV)
 
     def extract_text_from_image(self, pil_image):
         pil_image.save("ocr_debug_original.png")
@@ -111,11 +125,14 @@ class OcrService:
             # Use the full validated mask for the main pass
             final_msg_mask = validated_combined 
             
-            proc_mask = cv2.dilate(final_msg_mask, np.ones((2, 2), np.uint8), iterations=1)
+            # Small dilation (2x1) to ensure line structure is maintained
+            proc_mask = cv2.dilate(validated_combined, np.ones((2, 1), np.uint8), iterations=1)
             final_mask = cv2.bitwise_not(proc_mask)
             cv2.imwrite("ocr_debug_final_mask.png", final_mask)
 
-            data = pytesseract.image_to_data(final_mask, lang='eng+rus+spa+por+chi_sim', config='--oem 1 --psm 6', output_type=Output.DICT)
+            # Added preserve_interword_spaces=1 to keep "Да не" separated
+            tess_config = '--oem 1 --psm 6 -c preserve_interword_spaces=1'
+            data = pytesseract.image_to_data(final_mask, lang=self.ocr_langs, config=tess_config, output_type=Output.DICT)
 
             temp_lines = defaultdict(list)
             for i in range(len(data['text'])):
@@ -168,7 +185,9 @@ class OcrService:
                         results.append({
                             "text": cleaned,
                             "y_bounds": (y_min, y_max),
-                            "full_hsv": hsv
+                            "full_hsv": hsv,
+                            "validated_mask": validated_combined, # Pass the mask for refined use
+                            "words": [{"text": data['text'][idx], "left": data['left'][idx], "width": data['width'][idx]} for idx in indices]
                         })
             return results
         except Exception as e:
@@ -202,6 +221,45 @@ class OcrService:
         name_strip = cv2.copyMakeBorder(cv2.bitwise_not(cv2.dilate(valid_c[:, max(0, min(ex_x)-20):min(valid_c.shape[1], max(ex_x)+20)], np.ones((2,2), np.uint8))), 20, 20, 40, 40, cv2.BORDER_CONSTANT, value=[255,255,255])
         cv2.imwrite("ocr_debug_sender_pass.png", name_strip)
         
-        name = pytesseract.image_to_string(name_strip, lang='eng+rus+spa+por+chi_sim+tur', config='--oem 1 --psm 6').strip()
-        name = re.sub(r'[^\w\d\s\._\-\[\]#]', '', name).strip()
+        tess_config = '--oem 1 --psm 6 -c preserve_interword_spaces=1'
+        name = pytesseract.image_to_string(name_strip, lang=self.ocr_langs, config=tess_config).strip()
+        # Allow more common Dota username characters (+, (, ), etc.)
+        name = re.sub(r'[^\w\d\s\._\-\[\]#\+\(\)!@\$%\*\?]', '', name).strip()
         return name if len(name) >= 2 else None
+
+    def extract_refined_message(self, hsv, y_bounds, x_start_px, validated_mask, lang='rus'):
+        """
+        Performs a targeted, single-language OCR pass on just the message area.
+        This resolves Latin/Cyrillic competition for ambiguous characters.
+        Uses the high-quality HSV mask from the first pass to avoid noise.
+        """
+        y1, y2 = y_bounds
+        # Add a vertical buffer
+        y1_v, y2_v = max(0, y1-5), min(hsv.shape[0], y2+5)
+        
+        # Crop the pre-validated HSV mask
+        msg_mask = validated_mask[y1_v:y2_v, x_start_px:]
+        
+        # --- Noise Reduction (for refined pass) ---
+        # Clear small orphans (dots) that might be from the colon delimiter
+        # but keep larger chunks (characters)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(msg_mask, connectivity=8)
+        clean_msg_mask = np.zeros_like(msg_mask)
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_WIDTH] > 2 or stats[i, cv2.CC_STAT_HEIGHT] > 6:
+                clean_msg_mask[labels == i] = 255
+        
+        # Slightly dilate to ensure thin Cyrillic strokes (like ticks) are connected
+        msg_mask = cv2.dilate(clean_msg_mask, np.ones((2, 1), np.uint8), iterations=1)
+        
+        # Invert for Tesseract (Black on White)
+        msg_bin = cv2.bitwise_not(msg_mask)
+        
+        # Pad generously (50px instead of 40)
+        msg_final = cv2.copyMakeBorder(msg_bin, 30, 30, 50, 50, cv2.BORDER_CONSTANT, value=[255,255,255])
+        cv2.imwrite("ocr_debug_refined_msg.png", msg_final)
+        
+        tess_config = '--oem 1 --psm 7 -c preserve_interword_spaces=1'
+        refined_text = pytesseract.image_to_string(msg_final, lang=lang, config=tess_config).strip()
+        
+        return refined_text if len(refined_text) > 0 else None

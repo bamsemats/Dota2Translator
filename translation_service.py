@@ -1,17 +1,20 @@
 from google.cloud import translate_v3 as translate
 from usage_tracker import UsageTracker # Import UsageTracker
 
-TARGET_LANGUAGE = "en" # Always translate to English
-
 class TranslationService:
-    def __init__(self, project_id):
+    def __init__(self, project_id, target_lang="en"):
         self.project_id = project_id
+        self.target_lang = target_lang
         self.client = None # Will be initialized after OAuth
         self.usage_tracker = UsageTracker() # Instantiate UsageTracker
 
     def initialize_client(self, credentials):
         """Initializes the Google Cloud Translation client with provided credentials."""
         self.client = translate.TranslationServiceClient(credentials=credentials)
+
+    def set_target_lang(self, lang):
+        """Updates the target language for translations."""
+        self.target_lang = lang
 
     def translate_text(self, text, source_language="und"):
         """
@@ -30,7 +33,7 @@ class TranslationService:
             print("Warning: Translation free tier limit reached for this month. Further translation requests are blocked.")
             return original_text, original_text
         
-        if not text.strip() or source_language.lower() == TARGET_LANGUAGE:
+        if not text.strip() or source_language.lower() == self.target_lang:
             return original_text, original_text # No need to translate empty text or if already target language
 
         try:
@@ -46,10 +49,10 @@ class TranslationService:
                 if lang_detect_response.languages:
                     source_language = max(lang_detect_response.languages, key=lambda x: x.confidence).language_code
                 else:
-                    source_language = "en" # Default to English if detection fails
+                    source_language = self.target_lang # Default to target lang if detection fails
 
             # Skip translation if source is already target language
-            if source_language.lower() == TARGET_LANGUAGE:
+            if source_language.lower() == self.target_lang:
                 return original_text, original_text
 
             # Perform translation
@@ -59,7 +62,7 @@ class TranslationService:
                     "contents": [text],
                     "mime_type": "text/plain",
                     "source_language_code": source_language,
-                    "target_language_code": TARGET_LANGUAGE,
+                    "target_language_code": self.target_lang,
                 }
             )
 

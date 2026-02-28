@@ -18,6 +18,42 @@ from pynput import keyboard
 
 
 # =====================================================
+# CONSTANTS
+# =====================================================
+
+SUPPORTED_LANGUAGES = [
+    {"name": "English", "iso": "en", "tess": "eng"},
+    {"name": "Russian", "iso": "ru", "tess": "rus"},
+    {"name": "Spanish", "iso": "es", "tess": "spa"},
+    {"name": "Portuguese", "iso": "pt", "tess": "por"},
+    {"name": "Chinese (Simp)", "iso": "zh-CN", "tess": "chi_sim"},
+    {"name": "Turkish", "iso": "tr", "tess": "tur"},
+    {"name": "Swedish", "iso": "sv", "tess": "swe"},
+    {"name": "German", "iso": "de", "tess": "deu"},
+    {"name": "French", "iso": "fr", "tess": "fra"},
+    {"name": "Ukrainian", "iso": "uk", "tess": "ukr"},
+]
+
+# Comprehensive Tesseract language catalog for "Add Language" dropdown
+TESSERACT_LANG_CATALOG = {
+    "Afrikaans": "afr", "Albanian": "sqi", "Arabic": "ara", "Azerbaijani": "aze",
+    "Basque": "eus", "Belarusian": "bel", "Bengali": "ben", "Bulgarian": "bul",
+    "Catalan": "cat", "Chinese (Simp)": "chi_sim", "Chinese (Trad)": "chi_tra",
+    "Croatian": "hrv", "Czech": "ces", "Danish": "dan", "Dutch": "nld",
+    "English": "eng", "Esperanto": "epo", "Estonian": "est", "Finnish": "fin",
+    "French": "fra", "German": "deu", "Greek": "ell", "Hebrew": "heb",
+    "Hindi": "hin", "Hungarian": "hun", "Icelandic": "isl", "Indonesian": "ind",
+    "Italian": "ita", "Japanese": "jpn", "Korean": "kor", "Latvian": "lav",
+    "Lithuanian": "lit", "Macedonian": "mkd", "Malay": "msa", "Maltese": "mlt",
+    "Norwegian": "nor", "Persian": "fas", "Polish": "pol", "Portuguese": "por",
+    "Romanian": "ron", "Russian": "rus", "Serbian": "srp", "Slovak": "slk",
+    "Slovenian": "slv", "Spanish": "spa", "Swahili": "swa", "Swedish": "swe",
+    "Tagalog": "tgl", "Tamil": "tam", "Thai": "tha", "Turkish": "tur",
+    "Ukrainian": "ukr", "Vietnamese": "vie"
+}
+
+
+# =====================================================
 # MAIN APPLICATION
 # =====================================================
 
@@ -25,7 +61,7 @@ class DotaChatTranslatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Dota 2 Chat Translator")
-        self.root.geometry("1280x960") # Increased by 25% (1024x768 -> 1280x960)
+        self.root.geometry("1600x900") # Increased by 25% (1024x768 -> 1280x960)
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -40,13 +76,16 @@ class DotaChatTranslatorApp:
         self.current_theme = self.config.get_theme()
         self.google_cloud_project_id = self.config.get_project_id()
         self.hotkey_str = self.config.get_hotkey()
+        self.target_lang = self.config.get_target_lang()
+        self.ocr_langs_str = self.config.get_ocr_langs()
+        self.ocr_dashboard_str = self.config.get_ocr_dashboard()
 
         # Google services
         self.google_oauth_service = GoogleOAuthService(self.update_notification)
         self.credentials = None
 
-        self.ocr_service = OcrService() # No longer needs project_id
-        self.translation_service = TranslationService(self.google_cloud_project_id)
+        self.ocr_service = OcrService(ocr_langs=self.ocr_langs_str.replace(",", "+"))
+        self.translation_service = TranslationService(self.google_cloud_project_id, target_lang=self.target_lang)
         
         # Memory of seen senders to help parse colon-less lines
         self.sender_registry = set() 
@@ -351,6 +390,8 @@ class DotaChatTranslatorApp:
                 text = data["text"]
                 y_bounds = data["y_bounds"]
                 hsv = data["full_hsv"]
+                validated_mask = data["validated_mask"]
+                line_words = data["words"]
 
                 # Detect Tag and Message from the white text
                 parsed = self.parse_chat_line(text)
@@ -373,18 +414,71 @@ class DotaChatTranslatorApp:
                     
                     msg_words = msg_text.split()
                     strip_idx = 0
-                    for i in range(min(len(msg_words), 4)): # Check first 4 words
+                    for i in range(min(len(msg_words), 5)): # Check first 5 words
+                        # Clean the word, but keep it possibly combined with next word
                         word_clean = re.sub(r'\W+', '', msg_words[i].lower())
-                        if word_clean in sender_parts or any(p in word_clean for p in sender_parts if len(p) > 2):
+                        if not word_clean:
+                            strip_idx = i + 1
+                            continue
+                            
+                        # Stricter matching: 
+                        # 1. Exact match for any word length
+                        # 2. Substring match ONLY for words longer than 3 chars
+                        is_part_of_name = False
+                        if word_clean in sender_parts:
+                            is_part_of_name = True
+                        elif len(word_clean) > 3:
+                            is_part_of_name = (
+                                any(p in word_clean for p in sender_parts if len(p) > 2) or
+                                any(word_clean in p for p in sender_parts if len(word_clean) > 2)
+                            )
+                        
+                        if is_part_of_name:
                             strip_idx = i + 1
                         else:
+                            # Also check if the word is just punctuation/brackets left over
+                            if re.sub(r'^[\[\]\(\)\+!#:;,\. ]+', '', msg_words[i]) == "":
+                                strip_idx = i + 1
+                                continue
                             break
                     
                     if strip_idx > 0:
                         parsed["message"] = " ".join(msg_words[strip_idx:]).strip()
-                        # Final cleanup for any leftover colon/dots
-                        parsed["message"] = re.sub(r"^[ :;.,\.]+", "", parsed["message"]).strip()
+                        # Final cleanup for any leftover colon/dots/brackets from the name
+                        # But be careful NOT to strip actual Cyrillic or Alpha characters
+                        parsed["message"] = re.sub(r"^[ :;.,\.\+\]\)!#|]+", "", parsed["message"]).strip()
                 
+                # --- PASS 3: Refined Russian OCR for Message Part ---
+                # If we have a message, let's re-scan it with just Russian to be sure.
+                if parsed["message"] and len(parsed["message"]) > 1:
+                    # Dynamically find where the message starts horizontally
+                    # We look for the word in Pass 1 that matches the first word of our cleaned message
+                    first_msg_word = parsed["message"].split()[0]
+                    clean_first = re.sub(r'\W+', '', first_msg_word.lower())
+                    
+                    # Default: 30% of width
+                    x_offset = int(screenshot.width * 0.3) * 3 
+                    
+                    for w_obj in line_words:
+                        w_clean = re.sub(r'\W+', '', w_obj["text"].lower())
+                        if clean_first and w_clean == clean_first:
+                            # Found it! Start slightly earlier to be safe
+                            x_offset = max(0, w_obj["left"] - 20)
+                            break
+                        elif w_obj["left"] > screenshot.width * 1.5: # 0.5 * 3
+                            # If we've passed 50% of screen without finding it, just use current x_offset
+                            break
+
+                    # If the message looks like it has Russian or is being misidentified as "ga"
+                    if re.search(r'[а-яА-ЯёЁ]', parsed["message"]) or "ga " in parsed["message"].lower() or "He " in parsed["message"]:
+                         refined = self.ocr_service.extract_refined_message(hsv, y_bounds, x_offset, validated_mask, lang='rus')
+                         if refined and len(refined) > 2:
+                             # Use the refined version if it found Cyrillic
+                             if re.search(r'[а-яА-ЯёЁ]', refined):
+                                 # Apply surgical cleanup to the refined text too
+                                 refined_clean = re.sub(r"^[ :;.,\.\+\]\)!#|]+", "", refined).strip()
+                                 parsed["message"] = refined_clean
+
                 # Translation pass
                 original_msg = parsed["message"]
                 if original_msg:
@@ -530,12 +624,17 @@ class DotaChatTranslatorApp:
 
         # 2. Sender Detection
         # Case A: Colon, Semicolon, or common OCR misreads (like . or i at the end of a word)
-        # We look for a colon or semicolon within the first 25 characters
-        # Added support for misread colons as dots if they follow a likely name
-        sender_match = re.search(r"^([^:;]{1,25})[:;](.*)", temp_line)
+        # We look for a delimiter within the first 30 characters
+        # Delimiters: : ; ! | and sometimes dots if they follow a bracket/name
+        sender_match = re.search(r"^([^:;!\|]{1,30})[:;!\|](.*)", temp_line)
         if not sender_match:
-            # Fallback: look for a space and a dot (common misread of ' :')
-            sender_match = re.search(r"^([^:;]{1,25})\s\.(.*)", temp_line)
+            # Fallback for dots or common colon misreads as 'i' or 'l'
+            # Only if it follows a likely name structure (like ending in a bracket)
+            sender_match = re.search(r"^([^:;]{1,30}[\]\)])[\.\sil](.*)", temp_line)
+            
+        if not sender_match:
+            # Look for a space and a dot (common misread of ' :')
+            sender_match = re.search(r"^([^:;]{1,30})\s\.(.*)", temp_line)
 
         if sender_match:
             potential_sender = sender_match.group(1).strip()
@@ -601,7 +700,13 @@ class DotaChatTranslatorApp:
             self.config,
             self.authorize_google_cloud,
             self.hotkey_str,
-            self.set_hotkey_from_settings
+            self.set_hotkey_from_settings,
+            self.target_lang,
+            self.set_target_lang,
+            self.ocr_langs_str,
+            self.set_ocr_langs,
+            self.ocr_dashboard_str,
+            self.set_ocr_dashboard
         )
 
 
@@ -634,6 +739,23 @@ class DotaChatTranslatorApp:
         self.keybinding_service.set_hotkey(new_hotkey)
 
         self.update_notification(f"Hotkey set: {new_hotkey}")
+
+
+    def set_target_lang(self, lang_code):
+        self.target_lang = lang_code
+        self.config.set_target_lang(lang_code)
+        self.translation_service.set_target_lang(lang_code)
+        self.update_notification(f"Target language: {lang_code}")
+
+    def set_ocr_langs(self, langs_str):
+        self.ocr_langs_str = langs_str
+        self.config.set_ocr_langs(langs_str)
+        self.ocr_service.set_ocr_langs(langs_str)
+        self.update_notification(f"OCR languages: {langs_str}")
+
+    def set_ocr_dashboard(self, dashboard_str):
+        self.ocr_dashboard_str = dashboard_str
+        self.config.set_ocr_dashboard(dashboard_str)
 
 
 # =====================================================
@@ -707,11 +829,17 @@ class SettingsWindow(tk.Toplevel):
         config,
         authorize_cb,
         current_hotkey,
-        set_hotkey_cb
+        set_hotkey_cb,
+        current_target_lang,
+        set_target_lang_cb,
+        current_ocr_langs,
+        set_ocr_langs_cb,
+        current_ocr_dashboard,
+        set_ocr_dashboard_cb
     ):
         super().__init__(master)
         self.title("Settings")
-        self.geometry("450x620")
+        self.geometry("540x850") # Increased height for more settings
         self.resizable(False, False)
         self.grab_set()
 
@@ -721,19 +849,40 @@ class SettingsWindow(tk.Toplevel):
         self.config = config
         self.authorize = authorize_cb
         self.set_hotkey = set_hotkey_cb
+        self.set_target_lang = set_target_lang_cb
+        self.set_ocr_langs = set_ocr_langs_cb
+        self.set_ocr_dashboard = set_ocr_dashboard_cb
 
         # Match theme background
         bg_color = "#313338" if current_theme == "Dark" else "#F2F3F5"
         self.configure(bg=bg_color)
 
-        self.main = ttk.Frame(self, padding=20)
-        self.main.pack(fill=tk.BOTH, expand=True)
+        # Main container with a scrollbar because it's getting long
+        container = ttk.Frame(self)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(container, bg=bg_color, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        self.main = self.scrollable_frame # Redirect old code to use the scrollable part
 
         # Region
         self.select_region_cb = select_region_cb
 
         region_frame = ttk.LabelFrame(self.main, text="Chat Region", padding=10)
-        region_frame.pack(fill=tk.X, pady=(0, 10))
+        region_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
 
         ttk.Button(
             region_frame,
@@ -742,9 +891,60 @@ class SettingsWindow(tk.Toplevel):
             command=self._on_select_region_button_click
         ).pack(fill=tk.X, pady=5)
 
+        # Languages
+        lang_frame = ttk.LabelFrame(self.main, text="Languages", padding=10)
+        lang_frame.pack(fill=tk.X, padx=20, pady=10)
+
+        # Target Language Dropdown
+        ttk.Label(lang_frame, text="Translate To:").pack(anchor="w")
+        self.target_lang_var = tk.StringVar(value=next((l["name"] for l in SUPPORTED_LANGUAGES if l["iso"] == current_target_lang), "English"))
+        target_combo = ttk.Combobox(
+            lang_frame,
+            textvariable=self.target_lang_var,
+            values=[l["name"] for l in SUPPORTED_LANGUAGES],
+            state="readonly"
+        )
+        target_combo.pack(fill=tk.X, pady=(2, 10))
+        target_combo.bind("<<ComboboxSelected>>", self.save_target_lang)
+
+        # OCR Languages Section
+        ttk.Label(lang_frame, text="Detect Chat Languages (OCR):").pack(anchor="w")
+        
+        # Add Language Dropdown
+        add_lang_frame = ttk.Frame(lang_frame)
+        add_lang_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.add_lang_var = tk.StringVar()
+        lang_names = sorted(TESSERACT_LANG_CATALOG.keys())
+        self.add_lang_combo = ttk.Combobox(
+            add_lang_frame, 
+            textvariable=self.add_lang_var, 
+            values=lang_names,
+            state="readonly"
+        )
+        self.add_lang_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.add_lang_combo.set("Add Language...")
+        
+        ttk.Button(
+            add_lang_frame, 
+            text="Add", 
+            width=5,
+            command=self.add_ocr_language
+        ).pack(side=tk.RIGHT)
+
+        # Dynamic Grid for Checkboxes + Delete buttons
+        self.ocr_grid_container = ttk.Frame(lang_frame)
+        self.ocr_grid_container.pack(fill=tk.X, pady=5)
+        
+        self.ocr_vars = {} # {tess_code: BooleanVar}
+        self.dashboard_list = current_ocr_dashboard.split(",")
+        self.active_list = current_ocr_langs.split(",")
+        
+        self.refresh_ocr_list()
+
         # Hotkey
         key_frame = ttk.LabelFrame(self.main, text="Snapshot Hotkey", padding=10)
-        key_frame.pack(fill=tk.X, pady=10)
+        key_frame.pack(fill=tk.X, padx=20, pady=10)
 
         self.hotkey_var = tk.StringVar(value=current_hotkey)
 
@@ -764,7 +964,7 @@ class SettingsWindow(tk.Toplevel):
 
         # Appearance (Font & Theme)
         appearance_frame = ttk.LabelFrame(self.main, text="Appearance", padding=10)
-        appearance_frame.pack(fill=tk.X, pady=10)
+        appearance_frame.pack(fill=tk.X, padx=20, pady=10)
 
         # Font Family
         ttk.Label(appearance_frame, text="Font Family").pack(anchor="w")
@@ -809,7 +1009,7 @@ class SettingsWindow(tk.Toplevel):
 
         # Google Cloud
         gcp_frame = ttk.LabelFrame(self.main, text="Google Cloud API", padding=10)
-        gcp_frame.pack(fill=tk.X, pady=10)
+        gcp_frame.pack(fill=tk.X, padx=20, pady=10)
 
         ttk.Label(gcp_frame, text="Project ID").pack(anchor="w")
         self.project_id = tk.StringVar(value=config.get_project_id())
@@ -849,6 +1049,99 @@ class SettingsWindow(tk.Toplevel):
 # =====================================================
 # SETTINGS HELPERS
 # =====================================================
+
+    def refresh_ocr_list(self):
+        """Rebuilds the OCR language list UI from dashboard_list."""
+        for widget in self.ocr_grid_container.winfo_children():
+            widget.destroy()
+            
+        self.ocr_vars = {}
+        # Reverse lookup for display names
+        rev_catalog = {v: k for k, v in TESSERACT_LANG_CATALOG.items()}
+        
+        for i, tess_code in enumerate(self.dashboard_list):
+            if not tess_code: continue
+            
+            row = ttk.Frame(self.ocr_grid_container)
+            row.pack(fill=tk.X, pady=1)
+            
+            is_checked = tess_code in self.active_list
+            var = tk.BooleanVar(value=is_checked)
+            self.ocr_vars[tess_code] = var
+            
+            display_name = rev_catalog.get(tess_code, tess_code)
+            
+            cb = ttk.Checkbutton(
+                row, 
+                text=display_name, 
+                variable=var,
+                command=self.save_ocr_langs
+            )
+            cb.pack(side=tk.LEFT)
+            
+            # Delete button (X)
+            # Use a lambda with captured tess_code
+            ttk.Button(
+                row, 
+                text="X", 
+                width=2,
+                command=lambda tc=tess_code: self.remove_ocr_language(tc)
+            ).pack(side=tk.RIGHT)
+
+    def add_ocr_language(self):
+        lang_name = self.add_lang_var.get()
+        if lang_name in TESSERACT_LANG_CATALOG:
+            tess_code = TESSERACT_LANG_CATALOG[lang_name]
+            if tess_code not in self.dashboard_list:
+                self.dashboard_list.append(tess_code)
+                # Automatically enable it when added
+                if tess_code not in self.active_list:
+                    self.active_list.append(tess_code)
+                
+                self.save_ocr_dashboard_state()
+                self.refresh_ocr_list()
+                self.save_ocr_langs()
+                self.notify(f"Added {lang_name}")
+            else:
+                self.notify(f"{lang_name} already in list")
+        
+    def remove_ocr_language(self, tess_code):
+        if tess_code in self.dashboard_list:
+            self.dashboard_list.remove(tess_code)
+            if tess_code in self.active_list:
+                self.active_list.remove(tess_code)
+            
+            self.save_ocr_dashboard_state()
+            self.refresh_ocr_list()
+            self.save_ocr_langs()
+            self.notify(f"Removed {tess_code}")
+
+    def save_ocr_dashboard_state(self):
+        dashboard_str = ",".join(self.dashboard_list)
+        self.set_ocr_dashboard(dashboard_str)
+
+    def save_target_lang(self, event=None):
+        name = self.target_lang_var.get()
+        lang_obj = next((l for l in SUPPORTED_LANGUAGES if l["name"] == name), None)
+        if lang_obj:
+            self.set_target_lang(lang_obj["iso"])
+            self.notify(f"Target language set to {name}")
+
+    def save_ocr_langs(self):
+        selected = [tess for tess, var in self.ocr_vars.items() if var.get()]
+        if not selected:
+            # Don't allow empty selection, default back to English if available
+            if "eng" in self.ocr_vars:
+                selected = ["eng"]
+                self.ocr_vars["eng"].set(True)
+            elif self.dashboard_list:
+                selected = [self.dashboard_list[0]]
+                self.ocr_vars[selected[0]].set(True)
+        
+        self.active_list = selected
+        langs_str = ",".join(selected)
+        self.set_ocr_langs(langs_str)
+        self.notify(f"OCR languages updated")
 
     def update_font(self):
         self.apply_font(
