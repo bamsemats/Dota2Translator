@@ -36,20 +36,23 @@ class ChatParser:
 
         # 2. Sender Detection
         # Look for delimiters like : ; ! |
-        sender_match = re.search(r"^([^:;!\|]{1,30})[:;!\|](.*)", temp_line)
+        # We also check if the text before the delimiter is a likely name (1-20 chars, mostly alnum)
+        sender_match = re.search(r"^([^:;!\|]{1,25})[:;!\|](.*)", temp_line)
         if not sender_match:
-            # Fallback for dots or common colon misreads as 'i' or 'l' after a bracket
-            sender_match = re.search(r"^([^:;]{1,30}[\]\)])[\.\sil](.*)", temp_line)
+            # Fallback for dots or common colon misreads as 'i' or 'l' after a name-like structure
+            sender_match = re.search(r"^([^:;]{1,25}[\]\)])[\.\sil](.*)", temp_line)
             
         if not sender_match:
             # Look for a space and a dot (common misread of ' :')
-            sender_match = re.search(r"^([^:;]{1,30})\s\.(.*)", temp_line)
+            sender_match = re.search(r"^([^:;]{1,25})\s\.(.*)", temp_line)
 
         if sender_match:
             potential_sender = sender_match.group(1).strip()
             message_part = sender_match.group(2).strip()
 
-            if any(c.isalnum() for c in potential_sender):
+            # Robust validation: Sender should have at least one letter/digit 
+            # and shouldn't be too long or just symbols
+            if 1 <= len(potential_sender) <= 25 and any(c.isalnum() for c in potential_sender):
                 parsed["sender"] = potential_sender
                 parsed["message"] = message_part
                 self.register_sender(potential_sender)
@@ -64,6 +67,7 @@ class ChatParser:
                     parsed["sender"] = first_word
                     parsed["message"] = " ".join(words[1:]).strip()
                 elif parsed["tag"] and len(words) > 1:
+                    # If we have a tag, the first word is almost certainly a sender
                     potential_sender = words[0].strip()
                     if 1 <= len(potential_sender) <= 20 and any(c.isalnum() for c in potential_sender):
                         parsed["sender"] = potential_sender

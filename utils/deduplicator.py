@@ -24,8 +24,9 @@ class Deduplicator:
 
         # Fuzzy match check
         if self.history:
-            # process.extractOne returns (match, score, index)
-            match = process.extractOne(clean_text, self.history, scorer=fuzz.token_sort_ratio)
+            # Switch to fuzz.ratio (Levenshtein) instead of token_sort_ratio
+            # tokens_sort_ratio is too aggressive for chat as it ignores word order and punctuation
+            match = process.extractOne(clean_text, self.history, scorer=fuzz.ratio)
             if match and match[1] >= self.threshold:
                 return False
 

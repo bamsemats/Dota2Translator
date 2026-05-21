@@ -9,6 +9,7 @@ from translate.translation_service import TranslationService
 from utils.deduplicator import Deduplicator
 from utils.benchmark import Benchmark
 from utils.parser import ChatParser
+from usage_tracker import UsageTracker
 from langdetect import detect, DetectorFactory
 from utils.anchors import AnchorDetector
 import logging
@@ -27,14 +28,15 @@ class OcrPipeline:
         self.ocr_service = OcrService(lang='en', use_gpu=False)
         self.anchor_detector = AnchorDetector()
         
-        self.deduplicator = Deduplicator(threshold=85)
+        self.deduplicator = Deduplicator(threshold=97)
         self.parser = ChatParser()
         self.translation_service = None 
+        self.usage_tracker = UsageTracker()
 
     def set_translation_service(self, translation_service):
         self.translation_service = translation_service
 
-    def run(self, region, enabled_iso=None):
+    def run(self, region, enabled_iso=None, on_first_frame=None):
         """
         Fast & Accurate Full-ROI Pipeline:
         1. Quick Capture
@@ -50,6 +52,10 @@ class OcrPipeline:
         frames = self.capture_service.capture_frames(region, num_frames=3, interval_ms=10)
         if not frames:
             return []
+            
+        if on_first_frame and len(frames) > 0:
+            on_first_frame(frames[0])
+
         merged = self.preprocess_service.merge_frames(frames)
         
         # 2. Visual Anchor Detection (Fast CV)
@@ -57,6 +63,8 @@ class OcrPipeline:
             anchors = self.anchor_detector.find_anchors(merged)
         
         # 3. Single Pass Full-ROI OCR
+        self.usage_tracker.increment_ocr_requests()
+        
         # We cap width at 2000px in preprocess to keep detection fast (~1.2s)
         is_japan = self.ocr_service.lang == "japan"
         processed = self.preprocess_service.process_for_ocr(merged, preserve_details=is_japan)
@@ -64,6 +72,9 @@ class OcrPipeline:
         
         if not ocr_results:
             return []
+        
+        # ... (rest of logic) ...
+        # (I'll just replace the whole run method to be safe and clean)
 
         # 4. Robust Line Merging
         # Merges words into full horizontal lines with strict X-sorting
@@ -79,13 +90,22 @@ class OcrPipeline:
         for line in lines:
             text = line["text"].strip()
             y_center = self._get_y_center(line["bbox"])
+            x_start = self._get_x_start(line["bbox"])
             
             # Check for anchor alignment
             is_head = any(abs(y_center - (a[1] * scale_f)) < 20 for a in anchors)
             
             parsed = self.parser.parse_line(text)
+            
+            # Heuristic: If we don't have a visual anchor, 
+            # we check for explicit tags or sender patterns.
             if not is_head:
-                is_head = parsed["sender"] is not None or ":" in text[:35]
+                is_head = parsed["sender"] is not None or parsed["tag"] is not None
+                
+            # Second heuristic: If it starts too far to the right, it's likely a continuation
+            # (In Dota chat, tags/senders start at the very left)
+            if x_start > 200 * scale_f:
+                is_head = False
 
             if is_head:
                 current_msg = {
@@ -129,6 +149,7 @@ class OcrPipeline:
                         detected_lang = probs[0].lang
                     
                     if detected_lang != 'en' and self.translation_service:
+                        self.usage_tracker.increment_translation_characters(len(full_message))
                         _, translated_message = self.translation_service.translate_text(full_message)
                 except Exception as e:
                     logger.warning(f"Translation error: {e}")

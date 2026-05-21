@@ -5,6 +5,7 @@ import os
 import re # Added for chat parsing
 import subprocess
 import ctypes
+import cv2
 
 # Enable DPI awareness at the very beginning to fix layout and capture issues
 try:
@@ -199,7 +200,33 @@ class DotaChatTranslatorApp:
         self.screenshot_label = ttk.Label(self.screenshot_frame, text="No capture", anchor="center")
         self.screenshot_label.pack(fill=tk.BOTH, expand=True)
 
+        # Footer Area (Usage Stats)
+        self.footer_frame = ttk.Frame(self.main_frame)
+        self.footer_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.usage_label = ttk.Label(
+            self.footer_frame,
+            text="OCR: 0/1000 | Trans: 0/500000 | Daily: 0",
+            font=(self.current_font_family, 8),
+            anchor="e"
+        )
+        self.usage_label.pack(side=tk.RIGHT)
+
         self.preview_container.bind("<Configure>", self.on_resize)
+        
+        self.update_usage_display()
+
+    def update_usage_display(self):
+        tracker = self.ocr_pipeline.usage_tracker
+        ocr_count = tracker.get_ocr_requests()
+        trans_count = tracker.get_translation_characters()
+        daily_count = tracker.get_daily_translation_characters()
+        
+        usage_text = f"OCR: {ocr_count}/{tracker.get_ocr_free_tier_limit()} | " \
+                     f"Trans: {trans_count}/{tracker.get_translation_free_tier_limit()} chars | " \
+                     f"Daily: {daily_count}"
+        
+        self.usage_label.config(text=usage_text)
 
     def set_theme(self, theme_name):
         self.current_theme = theme_name
@@ -267,31 +294,20 @@ class DotaChatTranslatorApp:
             self.update_notification("Google Cloud not authorized.")
             return
 
-        # 1. Capture and display preview INSTANTLY
-        try:
-            capturer = ScreenCapture()
-            self.last_screenshot_pil = capturer.capture_region(self.chat_region)
-            self.display_last_screenshot()
-        except Exception as e:
-            print(f"Error capturing preview: {e}")
-
-        self.update_notification("Processing OCR + Translation...")
+        self.update_notification("Starting capture...")
 
         thread = threading.Thread(
             target=self.run_ocr_pipeline,
-            args=(self.last_screenshot_pil,),
             daemon=True
         )
         thread.start()
 
     def reprocess_last_snapshot(self):
-        # In PaddleOCR pipeline, we don't necessarily keep the last image
-        # but we can re-run the pipeline on the current region.
         self.take_snapshot()
 
-    def run_ocr_pipeline(self, screenshot=None, deep_scan=False):
+    def run_ocr_pipeline(self, deep_scan=False):
         try:
-            self.update_notification("Processing (PaddleOCR)...")
+            self.safe_notify("Processing (PaddleOCR)...")
             
             # Get active ISO codes for better language detection
             active_iso = []
@@ -305,14 +321,26 @@ class DotaChatTranslatorApp:
             if "en" not in active_iso: active_iso.append("en")
             if self.target_lang not in active_iso: active_iso.append(self.target_lang)
             
+            def handle_first_frame(frame_bgr):
+                # Convert BGR (from CaptureService) to PIL for display
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(frame_rgb)
+                self.last_screenshot_pil = pil_img
+                self.root.after(0, self.display_last_screenshot)
+
             # The new pipeline handles capture internally.
-            results = self.ocr_pipeline.run(self.chat_region, enabled_iso=active_iso)
+            results = self.ocr_pipeline.run(
+                self.chat_region, 
+                enabled_iso=active_iso, 
+                on_first_frame=handle_first_frame
+            )
 
             if not results:
                 self.safe_notify("No new text detected.")
                 return
 
             self.root.after(0, lambda: self.display_translation(results))
+            self.root.after(0, self.update_usage_display)
             self.safe_notify("Ready.")
 
         except Exception as e:
