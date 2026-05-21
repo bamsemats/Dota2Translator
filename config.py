@@ -31,8 +31,8 @@ class AppConfig:
         self.config['UI']['theme'] = "Light"
         self.config['General']['hotkey'] = "<f8>" # Default hotkey
         self.config['General']['target_lang'] = "en" # Default target language
-        self.config['General']['ocr_langs'] = "eng,rus,spa,por,chi_sim" # Back to eng priority
-        self.config['General']['ocr_dashboard'] = "eng,rus,spa,por,chi_sim,tur,swe" 
+        self.config['General']['ocr_langs'] = "en,ru,ch" # PaddleOCR defaults
+        self.config['General']['ocr_dashboard'] = "en,ru,japan,ch,korean,french,german" 
         self.config['GoogleCloud']['project_id'] = ""
         self.config['General']['first_run'] = "True" # New: Flag for first run
 

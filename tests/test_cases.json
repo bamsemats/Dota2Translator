@@ -1,0 +1,13 @@
+[
+    {
+        "image": "tests/images/ocr_test_image.png",
+        "expected": [
+            "[Allies] Yellow Player: Attack Pudge (Bottom Jungle)",
+            "[Allies] Yellow Player: b",
+            "[All] Purple Player: НЕ УСТАЛИ",
+            "[All] Purple Player: ПРЯТАТЬЬСЯ",
+            "[All] Unknown: Well Played!",
+            "[All] Light Blue Player: No brains."
+        ]
+    }
+]

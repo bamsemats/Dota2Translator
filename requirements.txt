@@ -1,9 +1,12 @@
-Pillow
+paddleocr
+paddlepaddle
+mss
+rapidfuzz
 opencv-python
-pytesseract
+numpy
+Pillow
+pynput
 google-cloud-translate
 google-auth-oauthlib
-numpy
-pynput
-pyinstaller
 PyJWT
+langdetect

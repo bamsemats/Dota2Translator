@@ -4,13 +4,23 @@ import threading
 import os
 import re # Added for chat parsing
 import subprocess
+import ctypes
+
+# Enable DPI awareness at the very beginning to fix layout and capture issues
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1) # PROCESS_SYSTEM_DPI_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 from PIL import ImageTk, Image # Added for image display
 
 from screenshot_utils import RegionSelector, ScreenCapture
 from config import AppConfig
-from ocr_service import OcrService
-from translation_service import TranslationService
+from ocr_pipeline import OcrPipeline
+from translate.translation_service import TranslationService
 from google_oauth_service import GoogleOAuthService
 from keybinding_service import KeybindingService
 
@@ -22,34 +32,23 @@ from pynput import keyboard
 # =====================================================
 
 SUPPORTED_LANGUAGES = [
-    {"name": "English", "iso": "en", "tess": "eng"},
-    {"name": "Russian", "iso": "ru", "tess": "rus"},
-    {"name": "Spanish", "iso": "es", "tess": "spa"},
-    {"name": "Portuguese", "iso": "pt", "tess": "por"},
-    {"name": "Chinese (Simp)", "iso": "zh-CN", "tess": "chi_sim"},
-    {"name": "Turkish", "iso": "tr", "tess": "tur"},
-    {"name": "Swedish", "iso": "sv", "tess": "swe"},
-    {"name": "German", "iso": "de", "tess": "deu"},
-    {"name": "French", "iso": "fr", "tess": "fra"},
-    {"name": "Ukrainian", "iso": "uk", "tess": "ukr"},
+    {"name": "English", "iso": "en", "paddle": "en"},
+    {"name": "Russian", "iso": "ru", "paddle": "ru"},
+    {"name": "Japanese", "iso": "ja", "paddle": "japan"},
+    {"name": "Chinese (Simp)", "iso": "zh-CN", "paddle": "ch"},
+    {"name": "Spanish", "iso": "es", "paddle": "en"},
+    {"name": "Portuguese", "iso": "pt", "paddle": "en"},
+    {"name": "Turkish", "iso": "tr", "paddle": "en"},
+    {"name": "Swedish", "iso": "sv", "paddle": "en"},
+    {"name": "German", "iso": "de", "paddle": "en"},
+    {"name": "French", "iso": "fr", "paddle": "en"},
 ]
 
-# Comprehensive Tesseract language catalog for "Add Language" dropdown
-TESSERACT_LANG_CATALOG = {
-    "Afrikaans": "afr", "Albanian": "sqi", "Arabic": "ara", "Azerbaijani": "aze",
-    "Basque": "eus", "Belarusian": "bel", "Bengali": "ben", "Bulgarian": "bul",
-    "Catalan": "cat", "Chinese (Simp)": "chi_sim", "Chinese (Trad)": "chi_tra",
-    "Croatian": "hrv", "Czech": "ces", "Danish": "dan", "Dutch": "nld",
-    "English": "eng", "Esperanto": "epo", "Estonian": "est", "Finnish": "fin",
-    "French": "fra", "German": "deu", "Greek": "ell", "Hebrew": "heb",
-    "Hindi": "hin", "Hungarian": "hun", "Icelandic": "isl", "Indonesian": "ind",
-    "Italian": "ita", "Japanese": "jpn", "Korean": "kor", "Latvian": "lav",
-    "Lithuanian": "lit", "Macedonian": "mkd", "Malay": "msa", "Maltese": "mlt",
-    "Norwegian": "nor", "Persian": "fas", "Polish": "pol", "Portuguese": "por",
-    "Romanian": "ron", "Russian": "rus", "Serbian": "srp", "Slovak": "slk",
-    "Slovenian": "slv", "Spanish": "spa", "Swahili": "swa", "Swedish": "swe",
-    "Tagalog": "tgl", "Tamil": "tam", "Thai": "tha", "Turkish": "tur",
-    "Ukrainian": "ukr", "Vietnamese": "vie"
+# Comprehensive PaddleOCR language catalog
+PADDLE_LANG_CATALOG = {
+    "English": "en", "Russian": "ru", "Japanese": "japan", "Chinese": "ch",
+    "Korean": "korean", "French": "french", "German": "german", "Italian": "it",
+    "Spanish": "es", "Portuguese": "pt"
 }
 
 
@@ -60,14 +59,14 @@ TESSERACT_LANG_CATALOG = {
 class DotaChatTranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Dota 2 Chat Translator")
-        self.root.geometry("1600x900") # Increased by 25% (1024x768 -> 1280x960)
+        self.root.title("Dota 2 Chat Translator (PaddleOCR)")
+        self.root.geometry("1600x900")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.config = AppConfig()
         
-        self.resize_timer = None # Timer for debouncing resizes
+        self.resize_timer = None
 
         # Load config
         self.chat_region = self.config.get_chat_region()
@@ -84,24 +83,30 @@ class DotaChatTranslatorApp:
         self.google_oauth_service = GoogleOAuthService(self.update_notification)
         self.credentials = None
 
-        self.ocr_service = OcrService(ocr_langs=self.ocr_langs_str.replace(",", "+"))
         self.translation_service = TranslationService(self.google_cloud_project_id, target_lang=self.target_lang)
+        self.ocr_pipeline = OcrPipeline(self.config)
+        self.ocr_pipeline.set_translation_service(self.translation_service)
         
         # Memory of seen senders to help parse colon-less lines
         self.sender_registry = set() 
+        self.recent_messages = [] 
+        self.max_recent = 100
 
         # Hotkey listener
         self.keybinding_service = KeybindingService(self.take_snapshot, self.hotkey_str)
         self.keybinding_service.start_listener()
 
-        self.last_screenshot_pil = None # Stores the PIL Image object
-        self.last_screenshot_tk = None # Stores the PhotoImage object for Tkinter to display
+        self.last_screenshot_pil = None 
+        self.last_screenshot_tk = None 
 
         self.create_widgets()
         self.apply_font_settings(self.current_font_family, self.current_font_size)
         self.set_theme(self.current_theme)
 
         self.authorize_google_cloud_startup()
+
+        # Apply OCR languages from config on startup
+        self.set_ocr_langs(self.ocr_langs_str)
 
         self.show_startup_status()
 
@@ -112,26 +117,12 @@ class DotaChatTranslatorApp:
 
     def register_sender(self, sender):
         """
-        Adds a sender to the registry, with a cap on the total number of senders
-        to prevent memory issues over long sessions.
+        Adds a sender to the registry.
         """
-        if not sender:
-            return
-            
-        sender_lower = sender.lower()
-        if len(self.sender_registry) > 100:
-            # Clear if it gets too large, it will rebuild from new chat lines
-            self.sender_registry.clear()
-            
-        self.sender_registry.add(sender_lower)
-
-
-# =====================================================
-# UI SETUP
-# =====================================================
+        self.ocr_pipeline.parser.register_sender(sender)
 
     def create_widgets(self):
-        # Main container with a Discord-ish background
+        # Main container
         self.root.configure(bg="#313338" if self.current_theme == "Dark" else "#F2F3F5")
         
         self.main_frame = ttk.Frame(self.root, padding=15)
@@ -161,6 +152,12 @@ class DotaChatTranslatorApp:
 
         ttk.Button(
             button_frame,
+            text="Reprocess",
+            command=self.reprocess_last_snapshot
+        ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            button_frame,
             text="Settings",
             command=self.open_settings
         ).pack(side=tk.LEFT)
@@ -169,7 +166,6 @@ class DotaChatTranslatorApp:
         self.chat_container = ttk.Frame(self.main_frame)
         self.chat_container.pack(fill=tk.BOTH, expand=True)
 
-        # Add a scrollbar to the text widget
         chat_scroll = ttk.Scrollbar(self.chat_container)
         chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -182,20 +178,17 @@ class DotaChatTranslatorApp:
             padx=10,
             pady=10,
             yscrollcommand=chat_scroll.set,
-            highlightthickness=0,
-            tabs=(80, 200) # Defined tab stops for columns
+            highlightthickness=0
         )
         self.translation_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         chat_scroll.config(command=self.translation_display.yview)
 
         # Tags
         self.translation_display.tag_configure("bold", font=(self.current_font_family, self.current_font_size, "bold"))
-        self.translation_display.tag_configure("allies_tag", foreground="#23A559") # Discord Green
-        self.translation_display.tag_configure("sender_tag", foreground="#5865F2") # Discord Blurple
         self.translation_display.tag_configure("message_tag", foreground="white") 
         self.translation_display.tag_configure("original_tag", foreground="#aaaaaa")
 
-        # Screenshot Preview - Increased height for better visibility
+        # Screenshot Preview
         self.preview_container = ttk.Frame(self.main_frame, height=400)
         self.preview_container.pack(fill=tk.BOTH, expand=False, pady=(15, 0))
         self.preview_container.pack_propagate(False)
@@ -206,143 +199,60 @@ class DotaChatTranslatorApp:
         self.screenshot_label = ttk.Label(self.screenshot_frame, text="No capture", anchor="center")
         self.screenshot_label.pack(fill=tk.BOTH, expand=True)
 
-        # Bind resize event to update preview scaling
         self.preview_container.bind("<Configure>", self.on_resize)
-
-
-# =====================================================
-# THEMES
-# =====================================================
 
     def set_theme(self, theme_name):
         self.current_theme = theme_name
         self.config.set_theme(theme_name)
-
         style = ttk.Style(self.root)
         
-        # Load Forest Theme
         theme_file = f"forest-{theme_name.lower()}.tcl"
         theme_path = os.path.join(os.path.dirname(__file__), "theme", theme_file)
         
-        theme_loaded = False
         if os.path.exists(theme_path):
             try:
                 self.root.tk.call("source", theme_path)
                 style.theme_use(f"forest-{theme_name.lower()}")
-                theme_loaded = True
-            except Exception as e:
-                print(f"Error loading forest theme: {e}")
-        
-        if not theme_loaded:
+            except:
+                style.theme_use("clam")
+        else:
             style.theme_use("clam")
-
-        # Explicitly configure colors to ensure Discord look
-        if theme_name == "Dark":
-            bg_color = "#313338"
-            panel_color = "#2B2D31"
-            text_color = "#DBDEE1"
-            accent_color = "#5865F2"
-            btn_color = "#4E5058"
-            
-            self.root.configure(bg=bg_color)
-            style.configure("TFrame", background=bg_color)
-            style.configure("TLabel", background=bg_color, foreground=text_color)
-            style.configure("TLabelframe", background=bg_color, foreground=text_color)
-            style.configure("TLabelframe.Label", background=bg_color, foreground=text_color)
-            
-            # Button Styling
-            style.configure("TButton", background=btn_color, foreground="white")
-            style.map("TButton", background=[("active", "#6D6F78")])
-            style.configure("Accent.TButton", background=accent_color, foreground="white")
-            style.map("Accent.TButton", background=[("active", "#4752C4")])
-            
-            self.translation_display.config(
-                bg=panel_color,
-                fg=text_color,
-                insertbackground="white"
-            )
-            self.translation_display.tag_configure("allies_tag", foreground="#23A559") 
-            self.translation_display.tag_configure("sender_tag", foreground="#949CF7")
-            self.translation_display.tag_configure("message_tag", foreground=text_color)
-            self.translation_display.tag_configure("original_tag", foreground="#949BA4")
-        else:
-            bg_color = "#F2F3F5"
-            panel_color = "#FFFFFF"
-            text_color = "#313338"
-            accent_color = "#5865F2"
-            btn_color = "#E3E5E8"
-            
-            self.root.configure(bg=bg_color)
-            style.configure("TFrame", background=bg_color)
-            style.configure("TLabel", background=bg_color, foreground=text_color)
-            style.configure("TLabelframe", background=bg_color, foreground=text_color)
-            style.configure("TLabelframe.Label", background=bg_color, foreground=text_color)
-            
-            # Button Styling
-            style.configure("TButton", background=btn_color, foreground=text_color)
-            style.map("TButton", background=[("active", "#D1D3D7")])
-            style.configure("Accent.TButton", background=accent_color, foreground="white")
-            style.map("Accent.TButton", background=[("active", "#4752C4")])
-            
-            self.translation_display.config(
-                bg=panel_color,
-                fg=text_color,
-                insertbackground="black"
-            )
-            self.translation_display.tag_configure("allies_tag", foreground="#1A8344")
-            self.translation_display.tag_configure("sender_tag", foreground="#5865F2")
-            self.translation_display.tag_configure("message_tag", foreground=text_color)
-            self.translation_display.tag_configure("original_tag", foreground="#5C5E66")
-        
-        # Style the Accent Button if the theme supports it (Forest does)
-        if theme_loaded:
-            style.configure("Accent.TButton", padding=6)
-        else:
-            # Fallback for clam/default
-            style.configure("Accent.TButton", foreground="white", background="#5865F2")
-
-
-# =====================================================
-# FONTS
-# =====================================================
 
     def apply_font_settings(self, family, size):
         self.current_font_family = family
         self.current_font_size = size
-
         new_font = font.Font(family=family, size=size)
-
         self.translation_display.config(font=new_font)
-        
-        # Dynamically update tab stops based on font size
-        # We use a character-width measurement for consistency
-        avg_char_width = new_font.measure("0")
-        tab1 = avg_char_width * 11 # Approx 11 chars for [Allies] tag
-        tab2 = avg_char_width * 30 # Approx 30 chars for sender (total)
-        self.translation_display.config(tabs=(tab1, tab2))
-
-        self.translation_display.tag_configure("bold", font=(family, size, "bold")) # Update bold tag
-
-
+        self.translation_display.tag_configure("bold", font=(family, size, "bold"))
         self.config.set_font_family(family)
         self.config.set_font_size(size)
 
-
-# =====================================================
-# GOOGLE AUTH
-# =====================================================
-
     def authorize_google_cloud_startup(self):
         self.credentials = self.google_oauth_service.authorize()
-
         if self.credentials:
-            # self.ocr_service.initialize_client(self.credentials) # No longer needed
             self.translation_service.initialize_client(self.credentials)
 
+    def show_startup_status(self):
+        if not self.chat_region:
+            self.update_notification("No chat region set.")
+        elif not self.google_cloud_project_id:
+            self.update_notification("Set Google Cloud Project ID.")
+        elif not self.credentials:
+            self.update_notification("Authorize Google Cloud.")
+        else:
+            self.update_notification("Ready.")
 
-# =====================================================
-# SNAPSHOT + OCR THREADING
-# =====================================================
+    def on_closing(self):
+        self.keybinding_service.stop_listener()
+        self.root.destroy()
+
+    def _open_readme_file(self):
+        readme_path = os.path.join(os.path.dirname(__file__), "README.md")
+        if os.path.exists(readme_path):
+            try:
+                os.startfile(readme_path)
+            except:
+                pass
 
     def take_snapshot(self):
         if not self.chat_region:
@@ -353,196 +263,117 @@ class DotaChatTranslatorApp:
             self.update_notification("Google Cloud Project ID missing.")
             return
 
-        # OCR client is local, so we only need to check the translation client
         if not self.translation_service.client:
             self.update_notification("Google Cloud not authorized.")
             return
+
+        # 1. Capture and display preview INSTANTLY
+        try:
+            capturer = ScreenCapture()
+            self.last_screenshot_pil = capturer.capture_region(self.chat_region)
+            self.display_last_screenshot()
+        except Exception as e:
+            print(f"Error capturing preview: {e}")
 
         self.update_notification("Processing OCR + Translation...")
 
         thread = threading.Thread(
             target=self.run_ocr_pipeline,
+            args=(self.last_screenshot_pil,),
             daemon=True
         )
         thread.start()
 
+    def reprocess_last_snapshot(self):
+        # In PaddleOCR pipeline, we don't necessarily keep the last image
+        # but we can re-run the pipeline on the current region.
+        self.take_snapshot()
 
-    def run_ocr_pipeline(self):
+    def run_ocr_pipeline(self, screenshot=None, deep_scan=False):
         try:
-            capturer = ScreenCapture()
-            screenshot = capturer.capture_region(self.chat_region)
+            self.update_notification("Processing (PaddleOCR)...")
+            
+            # Get active ISO codes for better language detection
+            active_iso = []
+            dashboard_langs = self.ocr_dashboard_str.split(",")
+            for dl in dashboard_langs:
+                match = next((l for l in SUPPORTED_LANGUAGES if l["paddle"] == dl or l["iso"] == dl), None)
+                if match:
+                    active_iso.append(match["iso"])
+            
+            # Ensure target language and English are always considered
+            if "en" not in active_iso: active_iso.append("en")
+            if self.target_lang not in active_iso: active_iso.append(self.target_lang)
+            
+            # The new pipeline handles capture internally.
+            results = self.ocr_pipeline.run(self.chat_region, enabled_iso=active_iso)
 
-            if not screenshot:
-                self.safe_notify("Screenshot failed.")
+            if not results:
+                self.safe_notify("No new text detected.")
                 return
 
-            self.last_screenshot_pil = screenshot # Store the PIL Image
-            
-            # Update the UI with the screenshot preview
-            self.root.after(0, self.display_last_screenshot)
-
-            # --- PASS 1: Get Message Lines (White text only) ---
-            extracted_data = self.ocr_service.extract_text_from_image(screenshot)
-
-            processed_messages = []
-
-            for data in extracted_data:
-                text = data["text"]
-                y_bounds = data["y_bounds"]
-                hsv = data["full_hsv"]
-                validated_mask = data["validated_mask"]
-                line_words = data["words"]
-
-                # Detect Tag and Message from the white text
-                parsed = self.parse_chat_line(text)
-                
-                # If no tag found, default to 'All'
-                if not parsed["tag"]:
-                    parsed["tag"] = "All"
-
-                # --- PASS 2: Get Sender Name (Colored text only) ---
-                # Targeted search within the same vertical bounds
-                sender_name = self.ocr_service.extract_sender_from_line(hsv, y_bounds)
-                if sender_name:
-                    parsed["sender"] = sender_name
-                    
-                    # Deduplication Logic: If the message still starts with the sender's name, strip it.
-                    # We check the first few words of the message against the detected sender.
-                    msg_text = parsed["message"]
-                    sender_clean = re.sub(r'\W+', ' ', sender_name.lower()).strip()
-                    sender_parts = set(sender_clean.split())
-                    
-                    msg_words = msg_text.split()
-                    strip_idx = 0
-                    for i in range(min(len(msg_words), 5)): # Check first 5 words
-                        # Clean the word, but keep it possibly combined with next word
-                        word_clean = re.sub(r'\W+', '', msg_words[i].lower())
-                        if not word_clean:
-                            strip_idx = i + 1
-                            continue
-                            
-                        # Stricter matching: 
-                        # 1. Exact match for any word length
-                        # 2. Substring match ONLY for words longer than 3 chars
-                        is_part_of_name = False
-                        if word_clean in sender_parts:
-                            is_part_of_name = True
-                        elif len(word_clean) > 3:
-                            is_part_of_name = (
-                                any(p in word_clean for p in sender_parts if len(p) > 2) or
-                                any(word_clean in p for p in sender_parts if len(word_clean) > 2)
-                            )
-                        
-                        if is_part_of_name:
-                            strip_idx = i + 1
-                        else:
-                            # Also check if the word is just punctuation/brackets left over
-                            if re.sub(r'^[\[\]\(\)\+!#:;,\. ]+', '', msg_words[i]) == "":
-                                strip_idx = i + 1
-                                continue
-                            break
-                    
-                    if strip_idx > 0:
-                        parsed["message"] = " ".join(msg_words[strip_idx:]).strip()
-                        # Final cleanup for any leftover colon/dots/brackets from the name
-                        # But be careful NOT to strip actual Cyrillic or Alpha characters
-                        parsed["message"] = re.sub(r"^[ :;.,\.\+\]\)!#|]+", "", parsed["message"]).strip()
-                
-                # --- PASS 3: Refined Russian OCR for Message Part ---
-                # If we have a message, let's re-scan it with just Russian to be sure.
-                if parsed["message"] and len(parsed["message"]) > 1:
-                    # Dynamically find where the message starts horizontally
-                    # We look for the word in Pass 1 that matches the first word of our cleaned message
-                    first_msg_word = parsed["message"].split()[0]
-                    clean_first = re.sub(r'\W+', '', first_msg_word.lower())
-                    
-                    # Default: 30% of width
-                    x_offset = int(screenshot.width * 0.3) * 3 
-                    
-                    for w_obj in line_words:
-                        w_clean = re.sub(r'\W+', '', w_obj["text"].lower())
-                        if clean_first and w_clean == clean_first:
-                            # Found it! Start slightly earlier to be safe
-                            x_offset = max(0, w_obj["left"] - 20)
-                            break
-                        elif w_obj["left"] > screenshot.width * 1.5: # 0.5 * 3
-                            # If we've passed 50% of screen without finding it, just use current x_offset
-                            break
-
-                    # If the message looks like it has Russian or is being misidentified as "ga"
-                    if re.search(r'[а-яА-ЯёЁ]', parsed["message"]) or "ga " in parsed["message"].lower() or "He " in parsed["message"]:
-                         refined = self.ocr_service.extract_refined_message(hsv, y_bounds, x_offset, validated_mask, lang='rus')
-                         if refined and len(refined) > 2:
-                             # Use the refined version if it found Cyrillic
-                             if re.search(r'[а-яА-ЯёЁ]', refined):
-                                 # Apply surgical cleanup to the refined text too
-                                 refined_clean = re.sub(r"^[ :;.,\.\+\]\)!#|]+", "", refined).strip()
-                                 parsed["message"] = refined_clean
-
-                # Translation pass
-                original_msg = parsed["message"]
-                if original_msg:
-                    _, translated_msg = self.translation_service.translate_text(original_msg, "und")
-                    parsed["translated_message"] = translated_msg
-                else:
-                    parsed["translated_message"] = ""
-
-                processed_messages.append(parsed)
-
-            self.root.after(0, lambda: self.display_translation(processed_messages))
+            self.root.after(0, lambda: self.display_translation(results))
+            self.safe_notify("Ready.")
 
         except Exception as e:
             self.safe_notify(f"Error: {e}")
             import traceback
             traceback.print_exc()
 
-
-    def display_translation(self, processed_messages):
+    def display_translation(self, results):
         self.translation_display.config(state=tk.NORMAL)
         
-        # Add a newline only if there's already content
         if self.translation_display.index(tk.END) != "1.0":
             self.translation_display.insert(tk.END, "\n")
         
-        for msg_obj in processed_messages:
-            tag = msg_obj["tag"]
-            sender = msg_obj["sender"]
-            original_msg = msg_obj["message"]
-            translated_msg = msg_obj["translated_message"]
+        # High-Contrast Discord-inspired Colors
+        if self.current_theme == "Dark":
+            bg_color = "#2B2D31"
+            tag_color = "#23A559" # Green
+            sender_color = "#949CF7" # Light Blurple
+            msg_color = "#DBDEE1" # Off-white
+            orig_color = "#949BA4" # Grey
+        else:
+            bg_color = "#FFFFFF"
+            tag_color = "#1A8344" # Dark Green
+            sender_color = "#4752C4" # Dark Blurple
+            msg_color = "#313338" # Dark Grey
+            orig_color = "#5C5E66" # Medium Grey
 
-            # 1. Column 1: Tag
+        self.translation_display.config(bg=bg_color)
+        self.translation_display.tag_configure("allies_tag", foreground=tag_color)
+        self.translation_display.tag_configure("sender_tag", foreground=sender_color, font=(self.current_font_family, self.current_font_size, "bold"))
+        self.translation_display.tag_configure("message_tag", foreground=msg_color)
+        self.translation_display.tag_configure("original_tag", foreground=orig_color)
+
+        for res in results:
+            tag = res.get("tag")
+            sender = res.get("sender")
+            original_msg = res.get("message", "")
+            translated_msg = res.get("translated_message", "")
+            lang = res.get("lang", "unknown").upper()
+
+            # 1. Tag [Allies]
             if tag:
-                tag_str = f"[{tag}]"
-                self.translation_display.insert(tk.END, tag_str, "allies_tag")
+                self.translation_display.insert(tk.END, f"[{tag}] ", "allies_tag")
             
-            self.translation_display.insert(tk.END, "\t")
-
-            # 2. Column 2: Sender
-            # If the sender pass detected a name, use it. Otherwise, use what the main pass found.
-            display_sender = sender if sender else ""
-            if display_sender:
-                self.translation_display.insert(tk.END, f"{display_sender}:", "sender_tag")
+            # 2. Sender
+            if sender:
+                self.translation_display.insert(tk.END, f"{sender}: ", "sender_tag")
             
-            self.translation_display.insert(tk.END, "\t")
-
-            # 3. Column 3: Message / Translation
-            # If translation happened and is significantly different from original
-            clean_original = original_msg.strip().lower()
-            clean_translated = translated_msg.strip().lower()
-            
-            # Simple heuristic: If length differs significantly or chars changed
-            if translated_msg and clean_translated != clean_original and len(clean_translated) > 1:
-                self.translation_display.insert(tk.END, translated_msg + " (Translation)\n", "bold")
+            # 3. Message / Translation
+            # If translated and significantly different
+            if translated_msg and translated_msg.lower().strip() != original_msg.lower().strip():
+                # Format: [RU] "Осторожно!" -> "Careful!"
+                lang_prefix = f"[{lang}] " if lang != "UNKNOWN" else ""
                 
-                # Display Original Line (indented to the 3rd column)
-                self.translation_display.insert(tk.END, f"\t\t({original_msg})\n", "original_tag")
+                self.translation_display.insert(tk.END, translated_msg + "\n", "message_tag")
+                self.translation_display.insert(tk.END, f"\t\t{lang_prefix}\"{original_msg}\"\n", "original_tag")
             else:
                 self.translation_display.insert(tk.END, original_msg + "\n", "message_tag")
         
-        # Auto-scroll to the end
         self.translation_display.see(tk.END)
         self.translation_display.config(state=tk.DISABLED)
-
         self.update_notification("Done.")
 
 
@@ -750,8 +581,40 @@ class DotaChatTranslatorApp:
     def set_ocr_langs(self, langs_str):
         self.ocr_langs_str = langs_str
         self.config.set_ocr_langs(langs_str)
-        self.ocr_service.set_ocr_langs(langs_str)
-        self.update_notification(f"OCR languages: {langs_str}")
+        
+        # Mapper for legacy Tesseract codes to PaddleOCR codes
+        legacy_map = {
+            "eng": "en",
+            "rus": "ru",
+            "chi_sim": "ch",
+            "jpn": "japan",
+            "spa": "en",
+            "por": "en",
+            "fra": "en",
+            "deu": "en",
+            "swe": "en",
+            "tur": "en"
+        }
+
+        # Language Selection Strategy:
+        # PaddleOCR uses specialized models for different scripts.
+        # Prioritize 'japan', 'ru', or 'ch' as they are inclusive models.
+        
+        lang_list = [l.strip() for l in langs_str.split(",")] if langs_str else ["en"]
+        mapped_langs = [legacy_map.get(l, l) for l in lang_list]
+        
+        # Prioritize inclusive models for maximum coverage
+        if "japan" in mapped_langs:
+            primary_lang = "japan"
+        elif "ru" in mapped_langs:
+            primary_lang = "ru"
+        elif "ch" in mapped_langs:
+            primary_lang = "ch"
+        else:
+            primary_lang = mapped_langs[0]
+            
+        self.ocr_pipeline.ocr_service.set_language(primary_lang)
+        self.update_notification(f"Multilingual OCR ready (Model: {primary_lang})")
 
     def set_ocr_dashboard(self, dashboard_str):
         self.ocr_dashboard_str = dashboard_str
@@ -915,7 +778,7 @@ class SettingsWindow(tk.Toplevel):
         add_lang_frame.pack(fill=tk.X, pady=(0, 10))
         
         self.add_lang_var = tk.StringVar()
-        lang_names = sorted(TESSERACT_LANG_CATALOG.keys())
+        lang_names = sorted(PADDLE_LANG_CATALOG.keys())
         self.add_lang_combo = ttk.Combobox(
             add_lang_frame, 
             textvariable=self.add_lang_var, 
@@ -1057,7 +920,7 @@ class SettingsWindow(tk.Toplevel):
             
         self.ocr_vars = {}
         # Reverse lookup for display names
-        rev_catalog = {v: k for k, v in TESSERACT_LANG_CATALOG.items()}
+        rev_catalog = {v: k for k, v in PADDLE_LANG_CATALOG.items()}
         
         for i, tess_code in enumerate(self.dashboard_list):
             if not tess_code: continue
@@ -1090,8 +953,8 @@ class SettingsWindow(tk.Toplevel):
 
     def add_ocr_language(self):
         lang_name = self.add_lang_var.get()
-        if lang_name in TESSERACT_LANG_CATALOG:
-            tess_code = TESSERACT_LANG_CATALOG[lang_name]
+        if lang_name in PADDLE_LANG_CATALOG:
+            tess_code = PADDLE_LANG_CATALOG[lang_name]
             if tess_code not in self.dashboard_list:
                 self.dashboard_list.append(tess_code)
                 # Automatically enable it when added

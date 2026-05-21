@@ -3,16 +3,31 @@ from tkinter import Toplevel, Canvas
 from PIL import ImageGrab, Image
 import time
 import os
+import ctypes
 
 class RegionSelector:
     def __init__(self, master, window_to_hide=None):
+        # Enable DPI awareness to fix "quarter screen" selection issue on 4K/scaled displays
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1) # PROCESS_SYSTEM_DPI_AWARE
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
         self.master = master
         self.window_to_hide = window_to_hide if window_to_hide else master
         self.selection_window = Toplevel(master)
         self.selection_window.overrideredirect(True) # No window decorations
         self.selection_window.attributes('-alpha', 0.3) # Transparent overlay
         self.selection_window.attributes('-topmost', True) # Always on top
-        self.selection_window.geometry(f"{self.master.winfo_screenwidth()}x{self.master.winfo_screenheight()}+0+0")
+        
+        # Use physical screen dimensions for the overlay to ensure full-screen coverage
+        user32 = ctypes.windll.user32
+        screen_width = user32.GetSystemMetrics(0)
+        screen_height = user32.GetSystemMetrics(1)
+        self.selection_window.geometry(f"{screen_width}x{screen_height}+0+0")
 
         self.canvas = Canvas(self.selection_window, cursor="cross", bg="grey")
         self.canvas.pack(fill=tk.BOTH, expand=True)
