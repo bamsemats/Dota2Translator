@@ -9,13 +9,21 @@ from translate.translation_service import TranslationService
 from utils.deduplicator import Deduplicator
 from utils.benchmark import Benchmark
 from utils.parser import ChatParser
+from utils.corrector import PostProcessor
 from usage_tracker import UsageTracker
-from langdetect import detect, DetectorFactory
 from utils.anchors import AnchorDetector
+from lingua import Language, LanguageDetectorBuilder
 import logging
 
 # Ensure consistent language detection results
-DetectorFactory.seed = 0
+# Configure Lingua with realistic Dota 2 languages
+SUPPORTED_LANGS = [
+    Language.SWEDISH, Language.BOKMAL, Language.DANISH, 
+    Language.ENGLISH, Language.SPANISH, Language.PORTUGUESE, 
+    Language.RUSSIAN, Language.TURKISH, Language.GERMAN, 
+    Language.FRENCH, Language.POLISH
+]
+detector = LanguageDetectorBuilder.from_languages(*SUPPORTED_LANGS).build()
 
 logger = logging.getLogger(__name__)
 
@@ -30,20 +38,20 @@ class OcrPipeline:
         
         self.deduplicator = Deduplicator(threshold=97)
         self.parser = ChatParser()
+        self.post_processor = PostProcessor()
         self.translation_service = None 
+        self.anthropic_service = None # Added for high-quality translation
         self.usage_tracker = UsageTracker()
 
     def set_translation_service(self, translation_service):
         self.translation_service = translation_service
 
+    def set_anthropic_service(self, anthropic_service):
+        self.anthropic_service = anthropic_service
+
     def run(self, region, enabled_iso=None, on_first_frame=None):
         """
-        Fast & Accurate Full-ROI Pipeline:
-        1. Quick Capture
-        2. Visual Anchor Detection (Fast CV)
-        3. Single Full-ROI OCR (Capped at 2000px for Speed)
-        4. Robust Horizontal Merging & Multi-line Support
-        5. Hinted Language Detection & Translation
+        STABILIZED MODE: Surgical Slicing + Direct Recognition + Verified Post-processing.
         """
         if not region:
             return []
@@ -57,116 +65,149 @@ class OcrPipeline:
             on_first_frame(frames[0])
 
         merged = self.preprocess_service.merge_frames(frames)
+        h_orig, w_orig = merged.shape[:2]
         
-        # 2. Visual Anchor Detection (Fast CV)
-        with Benchmark("Visual Anchor Detection"):
-            anchors = self.anchor_detector.find_anchors(merged)
+        # 2. SURGICAL ROW DETECTION: Use blue username anchors on raw image
+        y_centers = self.anchor_detector.find_chat_line_anchors(merged)
         
-        # 3. Single Pass Full-ROI OCR
-        self.usage_tracker.increment_ocr_requests()
+        # Select best model based on hints
+        if enabled_iso and any(iso in ['ru', 'zh', 'ja', 'ko'] for iso in enabled_iso):
+            # Use multilingual model if non-Latin hints are present
+            target_lang = 'ru' 
+            if 'ja' in enabled_iso: target_lang = 'japan'
+            elif 'zh' in enabled_iso: target_lang = 'ch'
+            self.ocr_service.set_language(target_lang)
         
-        # We cap width at 2000px in preprocess to keep detection fast (~1.2s)
-        is_japan = self.ocr_service.lang == "japan"
-        processed = self.preprocess_service.process_for_ocr(merged, preserve_details=is_japan)
-        ocr_results = self.ocr_service.extract_text(processed)
+        crops = []
+        row_bboxes = []
         
-        if not ocr_results:
-            return []
-        
-        # ... (rest of logic) ...
-        # (I'll just replace the whole run method to be safe and clean)
+        if y_centers:
+            # Calculate dynamic line height from gaps
+            if len(y_centers) >= 2:
+                avg_gap = np.mean(np.diff(y_centers))
+                half_h = int(avg_gap / 2) + 5
+            else:
+                half_h = 25 # Fallback for 1080p
+            
+            for cy in y_centers:
+                y1 = max(0, cy - half_h)
+                y2 = min(h_orig, cy + half_h)
+                
+                # Slice RAW merged image (BGR) for max fidelity
+                # Widened x-crop to ensure [Allies] prefix isn't cut off
+                crop = merged[y1:y2, :] 
+                
+                # 3x Upscale for maximum recognition accuracy (Verified surgical improvement)
+                hc, wc = crop.shape[:2]
+                if hc > 0 and wc > 0:
+                    upscaled = cv2.resize(crop, (wc*3, hc*3), interpolation=cv2.INTER_LANCZOS4)
+                    crops.append(upscaled)
+                    row_bboxes.append([0, y1, w_orig, y2 - y1])
+        else:
+            # Fallback: Detect any text bands (projection profile)
+            raw_rows = self.anchor_detector.find_all_rows(merged)
+            if raw_rows:
+                for y1, y2 in raw_rows:
+                    crop = merged[max(0, y1-5):min(h_orig, y2+5), :]
+                    hc, wc = crop.shape[:2]
+                    upscaled = cv2.resize(crop, (wc*2, hc*2), interpolation=cv2.INTER_LANCZOS4)
+                    crops.append(upscaled)
+                    row_bboxes.append([0, y1, w_orig, y2 - y1])
+            else:
+                # Last resort: Blind slice
+                num_lines = 6
+                row_h = h_orig // num_lines
+                for i in range(num_lines):
+                    y1, y2 = i * row_h, (i + 1) * row_h
+                    crops.append(merged[y1:y2, :])
+                    row_bboxes.append([0, y1, w_orig, row_h])
 
-        # 4. Robust Line Merging
-        # Merges words into full horizontal lines with strict X-sorting
-        lines = self._merge_ocr_lines(ocr_results)
+        # 3. BATCH RECOGNITION (Direct recognition, no detector)
+        self.usage_tracker.increment_ocr_requests()
+        with Benchmark(f"PaddleOCR Batch Recognition ({len(crops)} lines)"):
+            rec_results = self.ocr_service.batch_recognize_only(crops)
         
-        # 5. Multi-line Grouping based on Anchors
-        logical_messages = []
-        current_msg = None
-        
-        # Map anchors to processed space
-        scale_f = processed.shape[0] / merged.shape[0]
-        
-        for line in lines:
-            text = line["text"].strip()
-            y_center = self._get_y_center(line["bbox"])
-            x_start = self._get_x_start(line["bbox"])
+        if not rec_results:
+            return []
+
+        # 4. Parse, Clean & Translate
+        final_results = []
+        for i, res in enumerate(rec_results):
+            if not res or not res["text"] or len(res["text"].strip()) < 2:
+                continue
+                
+            text = res["text"].strip()
+            confidence = res["confidence"]
+            bbox = row_bboxes[i]
             
-            # Check for anchor alignment
-            is_head = any(abs(y_center - (a[1] * scale_f)) < 20 for a in anchors)
+            # DEBUG: See what the recognizer actually sees
+            logger.info(f"RAW OCR Line {i} (Conf: {confidence:.2f}): '{text}'")
             
+            # Apply minimal, verified cleaning
+            is_sv = enabled_iso and 'sv' in enabled_iso
+            text = self.post_processor.clean_text(text, is_swedish=is_sv)
+            
+            # Parse structure (Sender: Message)
             parsed = self.parser.parse_line(text)
             
-            # Heuristic: If we don't have a visual anchor, 
-            # we check for explicit tags or sender patterns.
-            if not is_head:
-                is_head = parsed["sender"] is not None or parsed["tag"] is not None
-                
-            # Second heuristic: If it starts too far to the right, it's likely a continuation
-            # (In Dota chat, tags/senders start at the very left)
-            if x_start > 200 * scale_f:
-                is_head = False
-
-            if is_head:
-                current_msg = {
-                    "sender": parsed["sender"] if parsed["sender"] else "Unknown",
-                    "tag": parsed["tag"],
-                    "message_parts": [parsed["message"]],
-                    "original_full": text,
-                    "confidence": line["confidence"]
-                }
-                logical_messages.append(current_msg)
-            elif current_msg:
-                # Append continuation line
-                current_msg["message_parts"].append(text)
-                current_msg["original_full"] += " " + text
-        
-        # 6. Finalize, Translate & Deduplicate
-        final_results = []
-        for msg in logical_messages:
-            full_message = " ".join(msg["message_parts"]).strip()
-            original_full = msg["original_full"].strip()
-            
-            if not full_message or len(full_message) < 2:
-                continue
-            
-            # Deduplicate on Original to allow unique foreign messages with same translation
-            if not self.deduplicator.is_new(original_full):
+            # Deduplicate based on original text
+            if not self.deduplicator.is_new(text):
                 continue
 
+            full_message = parsed["message"] if parsed["message"] else text
             translated_message = full_message
             detected_lang = "unknown"
             
+            # Language Detection & Translation
             if len(full_message) > 2:
                 try:
-                    # Hinted LangDetect
-                    from langdetect import detect_langs
-                    probs = detect_langs(full_message)
-                    if enabled_iso:
-                        enabled_probs = [p for p in probs if p.lang in enabled_iso]
-                        detected_lang = enabled_probs[0].lang if enabled_probs else probs[0].lang
-                    else:
-                        detected_lang = probs[0].lang
-                    
-                    if detected_lang != 'en' and self.translation_service:
-                        self.usage_tracker.increment_translation_characters(len(full_message))
-                        _, translated_message = self.translation_service.translate_text(full_message)
-                except Exception as e:
-                    logger.warning(f"Translation error: {e}")
+                    # 1. Get Lingua detection as a baseline hint
+                    conf_values = detector.compute_language_confidence_values(full_message)
+                    top_res = conf_values[0] if conf_values else None
+                    lingua_hint = None
+                    if top_res:
+                        lingua_hint = top_res.language.iso_code_639_1.name.lower()
+                        if lingua_hint == 'nb': lingua_hint = 'no'
 
-            lang_tag = f"[{detected_lang.upper()}] " if detected_lang != 'en' and detected_lang != 'unknown' else ""
-            tag_str = f"[{msg['tag']}] " if msg["tag"] else ""
-            sender = msg["sender"]
+                    # 2. Use Anthropic for high-quality translation if available
+                    if self.anthropic_service:
+                        res = self.anthropic_service.translate_message(full_message, hint_lang=lingua_hint)
+                        if res:
+                            detected_lang = res.get("lang", lingua_hint if lingua_hint else "unknown")
+                            translated_message = res.get("translation", full_message)
+                    else:
+                        # Fallback to Google + Lingua logic
+                        detected_lang = lingua_hint if lingua_hint else "unknown"
+                        
+                        # Apply confidence threshold for short strings
+                        word_count = len(full_message.split())
+                        if top_res and word_count < 8 and top_res.value < 0.7:
+                            detected_lang = "?"
+                        
+                        # Swedish-specific Nordic diacritic override
+                        if any(c in full_message.lower() for c in 'åäö'):
+                            if detected_lang in ['no', 'da']:
+                                detected_lang = 'sv'
+                                
+                        if detected_lang not in ['en', '?'] and self.translation_service:
+                            self.usage_tracker.increment_translation_characters(len(full_message))
+                            _, translated_message = self.translation_service.translate_text(full_message)
+                except Exception as e:
+                    logger.warning(f"Translation/Detection error: {e}")
+
+            channel_str = f"[{parsed['channel']}] " if parsed["channel"] else ""
+            tag_str = f" [{parsed['tag']}]" if parsed["tag"] else ""
+            sender = parsed["sender"] if parsed["sender"] else "Unknown"
             
             final_results.append({
-                "original": original_full,
-                "translated": f"{lang_tag}{tag_str}{sender}: {translated_message}",
+                "original": text,
+                "translated": f"{channel_str}{sender}{tag_str}: {translated_message}",
                 "lang": detected_lang,
                 "sender": sender,
                 "message": full_message,
                 "translated_message": translated_message,
-                "confidence": msg["confidence"],
-                "bbox": [0, 0, 0, 0]
+                "confidence": confidence,
+                "bbox": bbox
             })
         
         return final_results
@@ -181,7 +222,7 @@ class OcrPipeline:
             return min(p[0] for p in bbox)
         return bbox[0]
 
-    def _merge_ocr_lines(self, results, y_threshold=18):
+    def _merge_ocr_lines(self, results, y_threshold=30):
         """
         Groups OCR fragments into horizontal lines and sorts them by X.
         """

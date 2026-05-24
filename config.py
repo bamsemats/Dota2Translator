@@ -34,6 +34,7 @@ class AppConfig:
         self.config['General']['ocr_langs'] = "en,ru,ch" # PaddleOCR defaults
         self.config['General']['ocr_dashboard'] = "en,ru,japan,ch,korean,french,german" 
         self.config['GoogleCloud']['project_id'] = ""
+        self.config['GoogleCloud']['anthropic_api_key'] = "" # Added for Claude translation
         self.config['General']['first_run'] = "True" # New: Flag for first run
 
     def _save_config(self):
@@ -109,6 +110,12 @@ class AppConfig:
 
     def set_project_id(self, project_id):
         self.set('GoogleCloud', 'project_id', project_id)
+
+    def get_anthropic_api_key(self):
+        return self.get('GoogleCloud', 'anthropic_api_key', "")
+
+    def set_anthropic_api_key(self, api_key):
+        self.set('GoogleCloud', 'anthropic_api_key', api_key)
 
     def get_hotkey(self):
         return self.get('General', 'hotkey', "<f8>")

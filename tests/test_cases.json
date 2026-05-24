@@ -2,12 +2,12 @@
     {
         "image": "tests/images/ocr_test_image.png",
         "expected": [
-            "[Allies] Yellow Player: Attack Pudge (Bottom Jungle)",
-            "[Allies] Yellow Player: b",
-            "[All] Purple Player: НЕ УСТАЛИ",
-            "[All] Purple Player: ПРЯТАТЬЬСЯ",
-            "[All] Unknown: Well Played!",
-            "[All] Light Blue Player: No brains."
+            "[Allies] #w bamsemats [DT] : testa denna hjälte, han är väldigt skön!",
+            "[Allies] #w bamsemats [DT] : ok, då testar vi igen... kan du läsa detta?",
+            "[Allies] #w bamsemats [DT] : ok, då testar vi igen... kan du läsa detta?",
+            "[Allies] #w bamsemats [DT] : ok, då testar vi igen... kan du läsa detta?",
+            "[Allies] #w bamsemats [DT] : vale, probamos otra vez... puedes leer esto?",
+            "[Allies] #w bamsemats [DT] : testar, testar, ett, två..."
         ]
     }
 ]

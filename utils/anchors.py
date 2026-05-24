@@ -19,58 +19,125 @@ class AnchorDetector:
 
     def find_anchors(self, image_bgr):
         """
-        Finds chat line anchors (colons) using structural and color analysis.
-        Returns a list of (x, y_center) coordinates.
+        Finds chat line anchors by detecting player markers with strict geometric filtering.
         """
         hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv)
+        h, w = image_bgr.shape[:2]
         
-        # 1. Find potential colon dots (bright spots)
-        # Using a very high threshold for the dots
-        _, dots_mask = cv2.threshold(v, 200, 255, cv2.THRESH_BINARY)
+        # 1. Gutter Restriction: 
+        # Hero icons/Markers ONLY appear in the leftmost "gutter" (approx 8% of width)
+        gutter_w = int(w * 0.08)
+        roi_hsv = hsv[:, :gutter_w]
         
-        num, labels, stats, centroids = cv2.connectedComponentsWithStats(dots_mask, connectivity=8)
-        dots = []
-        for i in range(1, num):
-            w, hh, area = stats[i][2], stats[i][3], stats[i][4]
-            # Colon dots are small and roughly square
-            if 2 <= w <= 15 and 2 <= hh <= 15 and 4 <= area <= 150:
-                dots.append({'centroid': centroids[i], 'bbox': stats[i]})
+        candidates = []
         
-        anchors = []
-        # 2. Pair dots vertically
-        for i in range(len(dots)):
-            for j in range(i + 1, len(dots)):
-                d1, d2 = dots[i], dots[j]
-                dx = abs(d1['centroid'][0] - d2['centroid'][0])
-                dy = abs(d1['centroid'][1] - d2['centroid'][1])
+        for lower, upper in self.player_colors:
+            l = np.array([lower[0]-5, 70, 70])
+            u = np.array([upper[0]+5, 255, 255])
+            mask = cv2.inRange(roi_hsv, l, u)
+            
+            num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            
+            for i in range(1, num):
+                bw, bh, area = stats[i][2], stats[i][3], stats[i][4]
+                x_c, y_c = centroids[i]
                 
-                # Dota colons are vertically aligned (dx small) and have fixed gap (dy)
-                if dx < 10 and 10 < dy < 45:
-                    x = int((d1['centroid'][0] + d2['centroid'][0]) / 2)
-                    y = int((d1['centroid'][1] + d2['centroid'][1]) / 2)
-                    
-                    # 3. Color Validation: Check for player color to the left
-                    if self._is_player_chat(hsv, x, y):
-                        anchors.append((x, y))
-        
-        # Deduplicate anchors that are too close (same colon detected twice)
-        if not anchors:
+                # 2. Geometric Filtering:
+                # Hero icons are roughly square (1:1 ratio)
+                # Player bars are thin and vertical.
+                aspect_ratio = bw / bh if bh > 0 else 0
+                
+                # We ignore anything too large (UI backgrounds) or too thin (noise)
+                is_marker_shape = (0.2 < aspect_ratio < 1.5) and (area < 800)
+                
+                if area > 15 and is_marker_shape:
+                    candidates.append((int(x_c), int(y_c)))
+
+        if not candidates:
             return []
             
-        final_anchors = []
-        anchors.sort(key=lambda a: (a[1], a[0])) # Sort by Y then X
+        # 3. Column Consistency Check:
+        # Real chat markers will share a very similar X-coordinate.
+        # We group candidates by X and pick the most frequent column.
+        candidates.sort(key=lambda a: a[0])
         
-        if anchors:
-            curr = anchors[0]
-            for next_a in anchors[1:]:
-                if abs(next_a[1] - curr[1]) < 15 and abs(next_a[0] - curr[0]) < 20:
-                    continue # Skip duplicate
+        columns = []
+        if candidates:
+            curr_col = [candidates[0]]
+            for next_c in candidates[1:]:
+                if abs(next_c[0] - curr_col[0][0]) < 15: # Within 15px X-range
+                    curr_col.append(next_c)
+                else:
+                    columns.append(curr_col)
+                    curr_col = [next_c]
+            columns.append(curr_col)
+            
+        # Pick the column with the most candidates (likely the chat gutter)
+        # or all columns that look "chat-like" (vertical)
+        valid_anchors = []
+        for col in columns:
+            if len(col) >= 1: # Even 1 is okay if it's the only one, but we prioritize the densest
+                valid_anchors.extend(col)
+                
+        # 4. Deduplicate Y-coordinates
+        valid_anchors.sort(key=lambda a: a[1])
+        final_anchors = []
+        if valid_anchors:
+            curr = valid_anchors[0]
+            for next_a in valid_anchors[1:]:
+                if abs(next_a[1] - curr[1]) < 20: # Same line
+                    continue 
                 final_anchors.append(curr)
                 curr = next_a
             final_anchors.append(curr)
             
         return final_anchors
+
+    def find_chat_line_anchors(self, image_bgr):
+        """
+        Surgically finds chat line Y-centers using the blue username text as an anchor.
+        Most robust method for Dota 2 chat box.
+        """
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        
+        # Blue username text: Hue 100-130, high saturation
+        # We use a strict saturation floor to avoid background artifacts
+        lower_blue = np.array([100, 150, 100])
+        upper_blue = np.array([130, 255, 255])
+        mask = cv2.inRange(hsv, lower_blue, upper_blue)
+        
+        # Find contours of blue clusters
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        line_centers = []
+        for cnt in contours:
+            if cv2.contourArea(cnt) > 10: # Filter noise
+                m = cv2.moments(cnt)
+                if m["m00"] != 0:
+                    cy = int(m["m01"] / m["m00"])
+                    line_centers.append(cy)
+
+        if not line_centers:
+            return []
+
+        # Cluster Y-centers that are close together (same line)
+        line_centers.sort()
+        unique_centers = []
+        curr_cluster = [line_centers[0]]
+        
+        # Typical line height at 1080p is ~20px, at 4K ~40px. 
+        # A 30px grouping threshold is a safe middle ground.
+        group_thresh = 30 
+        
+        for cy in line_centers[1:]:
+            if cy - curr_cluster[-1] < group_thresh:
+                curr_cluster.append(cy)
+            else:
+                unique_centers.append(int(np.mean(curr_cluster)))
+                curr_cluster = [cy]
+        unique_centers.append(int(np.mean(curr_cluster)))
+        
+        return unique_centers
 
     def find_all_rows(self, image_bgr):
         """

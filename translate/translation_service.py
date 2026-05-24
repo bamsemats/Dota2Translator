@@ -39,7 +39,7 @@ class TranslationService:
         :param text: The text to translate.
         :param target_lang: Override the default target language.
         :param source_language: The detected source language code.
-        :return: (original_text, translated_text)
+        :return: (detected_lang, translated_text)
         """
         text = text.strip()
         original_text = text 
@@ -48,23 +48,23 @@ class TranslationService:
         target = target_lang if target_lang else self.target_lang
 
         if not text:
-            return original_text, original_text
+            return "und", original_text
 
         # Check Cache
         cache_key = (text, target)
         if cache_key in self.cache:
-            return original_text, self.cache[cache_key]
+            return self.cache[cache_key]
 
         if self.client is None:
-            return original_text, original_text
+            return "und", original_text
 
         if self.usage_tracker.is_translation_limit_reached():
             print("Warning: Translation limit reached. Check usage_data.json.")
-            return original_text, original_text
+            return "und", original_text
         
         # Don't translate if too short or if source is already the target
         if not self._is_worth_translating(text) or (source_language != "und" and source_language.lower() == target.lower()):
-            return original_text, original_text
+            return "und", original_text
 
         try:
             parent = f"projects/{self.project_id}/locations/global"
@@ -88,9 +88,9 @@ class TranslationService:
                 translated_text = response.translations[0].translated_text
                 detected_lang = response.translations[0].detected_language_code
                 
-                # If detected language is the same as target, don't cache and don't treat as translated
+                # If detected language is the same as target, don't treat as translated but return the lang
                 if detected_lang == self.target_lang:
-                    return original_text, original_text
+                    return detected_lang, original_text
 
                 # Cache the result
                 if len(self.cache) >= self.max_cache_size:
@@ -98,14 +98,15 @@ class TranslationService:
                     first_key = next(iter(self.cache))
                     del self.cache[first_key]
                 
-                self.cache[cache_key] = translated_text
+                result = (detected_lang, translated_text)
+                self.cache[cache_key] = result
                 
                 # Increment usage
                 self.usage_tracker.increment_translation_characters(len(text))
                 if self.usage_tracker.get_translation_usage_percentage() >= 80:
                     print(f"Warning: Translation usage at {self.usage_tracker.get_translation_usage_percentage():.0f}%")
 
-                return original_text, translated_text
+                return result
             
         except Exception as e:
             # Handle 429 specifically if we can, or just log generic error
@@ -115,4 +116,4 @@ class TranslationService:
             else:
                 print(f"Error during translation: {e}")
         
-        return original_text, original_text
+        return "und", original_text

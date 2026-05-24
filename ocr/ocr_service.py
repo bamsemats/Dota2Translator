@@ -20,40 +20,45 @@ except:
     pass
 
 class OcrService:
-    def __init__(self, lang='en', use_gpu=False):
+    def __init__(self, lang='en', use_gpu=False, det_db_unclip_ratio=2.0, det_limit_side_len=1600):
         """
         Initializes PaddleOCR.
         lang: 'en', 'ru', 'japan', 'ch', etc.
         """
         self.lang = lang
         self.device = 'gpu' if use_gpu else 'cpu'
+        self.det_db_unclip_ratio = det_db_unclip_ratio
+        self.det_limit_side_len = det_limit_side_len
         self.ocr = self._initialize_ocr()
 
     def _initialize_ocr(self):
         with Benchmark(f"Initializing PaddleOCR ({self.lang})"):
-            # Aligned with PaddleOCR 3.5.0 / PaddleX API
-            # Explicitly mapping common languages to their PaddleX registry names
-            # to avoid the slow 'server' detection model being used by default.
-            
+            # RESTORE: Specific models are more precise than general multilingual for these scripts.
             rec_model_map = {
-                'en': 'en_PP-OCRv5_mobile_rec',
+                'en': 'latin_PP-OCRv3_mobile_rec', # Latin model handles Swedish diacritics better than plain English
+                'latin': 'latin_PP-OCRv3_mobile_rec',
                 'ru': 'cyrillic_PP-OCRv5_mobile_rec',
                 'ch': 'PP-OCRv5_mobile_rec', 
-                'japan': 'PP-OCRv5_mobile_rec', # v5 Multilingual is excellent for Japanese
+                'japan': 'PP-OCRv5_mobile_rec',
                 'korean': 'korean_PP-OCRv5_mobile_rec'
             }
+            rec_model = rec_model_map.get(self.lang, 'latin_PP-OCRv3_mobile_rec')
             
-            rec_model = rec_model_map.get(self.lang, 'PP-OCRv5_mobile_rec')
-            
+            # Note: We still use 'en' as the primary lang for detector/recognizer components
+            # but the actual weights will be the v5 mobile ones where available.
             return PaddleOCR(
-                lang=self.lang, 
+                lang='latin' if self.lang in ['en', 'latin'] else self.lang, 
                 device=self.device,
                 use_textline_orientation=False, 
                 text_detection_model_name='PP-OCRv5_mobile_det',
                 text_recognition_model_name=rec_model,
-                text_det_limit_side_len=1600,   # FAST: ~1.2s on full 4K ROI
+                text_det_limit_side_len=self.det_limit_side_len,
+                # REFINED PARAMETERS:
+                det_db_unclip_ratio=self.det_db_unclip_ratio, 
+                det_db_thresh=0.4,        # Restore balanced sensitivity
+                det_db_box_thresh=0.6,    # Slightly stricter box filtering
                 enable_mkldnn=False,
-                rec_batch_num=10
+                rec_batch_num=6
             )
 
     def extract_text(self, image):
@@ -136,30 +141,40 @@ class OcrService:
 
         data_block = result[0]
         
-        # Format 1: Dictionary
+        # Format 1: Dictionary (Paddlex)
         if isinstance(data_block, dict):
             texts = data_block.get("rec_texts", [])
             scores = data_block.get("rec_scores", [])
-            boxes = data_block.get("rec_boxes", [])
+            # Favor polys for better geometry, fallback to boxes
+            shapes = data_block.get("rec_polys", data_block.get("rec_boxes", []))
+            
             for i in range(len(texts)):
+                bbox = shapes[i]
+                # Ensure bbox is a standard list
+                if hasattr(bbox, 'tolist'):
+                    bbox = bbox.tolist()
+                
                 parsed_results.append({
                     "text": texts[i],
                     "confidence": scores[i] if i < len(scores) else 0.0,
-                    "bbox": boxes[i] if i < len(boxes) else []
+                    "bbox": bbox
                 })
             return parsed_results
 
-        # Format 2: List
+        # Format 2: List (Legacy)
         # Format: [ [[bbox], [text, conf]], ... ]
         for line in data_block:
-            if len(line) >= 2:
-                bbox = line[0]
-                text, confidence = line[1]
-                parsed_results.append({
-                    "text": text,
-                    "confidence": confidence,
-                    "bbox": bbox
-                })
+            try:
+                if len(line) >= 2 and isinstance(line[1], (list, tuple)):
+                    bbox = line[0]
+                    text, confidence = line[1]
+                    parsed_results.append({
+                        "text": text,
+                        "confidence": confidence,
+                        "bbox": bbox
+                    })
+            except:
+                continue
         
         return parsed_results
 
@@ -168,7 +183,7 @@ class OcrService:
         Performs recognition ONLY by calling the underlying PaddleX recognizer component.
         This is the fastest possible way to OCR a single row.
         """
-        if image is None:
+        if image is None or image.size == 0:
             return None
 
         if len(image.shape) == 2:
@@ -179,20 +194,21 @@ class OcrService:
         with Benchmark("PaddleOCR Recognition Only (Direct)"):
             try:
                 # Use the internal PaddleX pipeline component if available for max speed
-                if hasattr(self.ocr, 'paddlex_pipeline') and hasattr(self.ocr.paddlex_pipeline, 'text_rec_model'):
-                    # The internal model takes a list of images or a single image
-                    res = self.ocr.paddlex_pipeline.text_rec_model(image_ocr)
-                    # Result format for text_rec_model is usually a list of dicts
-                    if res and len(res) > 0:
-                         data = res[0]
-                         return {
-                             "text": data.get("rec_text", ""),
-                             "confidence": data.get("rec_score", 0.0)
-                         }
+                if hasattr(self.ocr, 'paddlex_pipeline'):
+                    pipeline = self.ocr.paddlex_pipeline
+                    # Check for text_rec_model (PaddleX 3.x)
+                    if hasattr(pipeline, 'text_rec_model'):
+                        # PaddleX models return a generator, convert to list
+                        res = list(pipeline.text_rec_model(image_ocr))
+                        if res and len(res) > 0:
+                            data = res[0]
+                            # PaddleX 3.x output format
+                            return {
+                                "text": data.get("rec_text", ""),
+                                "confidence": data.get("rec_score", 0.0)
+                            }
                 
-                # Fallback to standard ocr call with det=False if above fails
-                # (Note: newer PaddleOCR might still have issues with det=False, 
-                # but the internal component call is the 'pro' way)
+                # Fallback to standard ocr call (might fail on 3.x if det=False is removed)
                 result = self.ocr.ocr(image_ocr, det=False)
                 if result and result[0]:
                     text, confidence = result[0][0]
@@ -211,44 +227,45 @@ class OcrService:
             return []
 
         processed_images = []
-        for img in images:
-            if len(img.shape) == 2:
-                processed_images.append(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
-            else:
-                processed_images.append(img)
+        valid_indices = []
+        for i, img in enumerate(images):
+            if img is not None and img.size > 0:
+                if len(img.shape) == 2:
+                    processed_images.append(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+                else:
+                    processed_images.append(img)
+                valid_indices.append(i)
 
-        with Benchmark(f"PaddleOCR Batch Recognition ({len(images)} crops)"):
-            # The ocr method can take a list of images in some versions,
-            # but usually we want to call the internal predictor for batching.
-            results = []
-            for img in processed_images:
-                # Still using ocr() for stability, but on small crops it's very fast
-                res = self.ocr.ocr(img)
-                results.append(res)
+        if not processed_images:
+            return [None] * len(images)
+
+        results = [None] * len(images)
+        with Benchmark(f"PaddleOCR Batch Recognition ({len(processed_images)} valid crops)"):
+            try:
+                batch_res = []
+                if hasattr(self.ocr, 'paddlex_pipeline'):
+                    pipeline = self.ocr.paddlex_pipeline
+                    if hasattr(pipeline, 'text_rec_model'):
+                        # Batch call to text_rec_model
+                        batch_res = pipeline.text_rec_model(processed_images)
+                
+                if batch_res:
+                    for idx, data in zip(valid_indices, batch_res):
+                        results[idx] = {
+                            "text": data.get("rec_text", ""),
+                            "confidence": data.get("rec_score", 0.0)
+                        }
+                else:
+                    # Fallback
+                    for idx, img in zip(valid_indices, processed_images):
+                        res = self.ocr.ocr(img, det=False)
+                        if res and res[0]:
+                            text, confidence = res[0][0]
+                            results[idx] = {"text": text, "confidence": confidence}
+            except Exception as e:
+                logging.error(f"Batch Recognition Error: {e}")
         
-        parsed = []
-        for res in results:
-            if not res or not res[0]:
-                parsed.append(None)
-                continue
-            
-            data = res[0]
-            if isinstance(data, dict):
-                texts = data.get("rec_texts", [])
-                scores = data.get("rec_scores", [])
-                parsed.append({"text": texts[0] if texts else "", "confidence": scores[0] if scores else 0.0})
-            else:
-                # Handle list format
-                try:
-                    line = data[0]
-                    if len(line) >= 2 and isinstance(line[1], (list, tuple)):
-                        text, confidence = line[1]
-                        parsed.append({"text": text, "confidence": confidence})
-                    else:
-                        parsed.append(None)
-                except:
-                    parsed.append(None)
-        return parsed
+        return results
 
     def set_language(self, lang):
         if self.lang != lang:

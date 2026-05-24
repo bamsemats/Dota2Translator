@@ -19,33 +19,47 @@ class PreprocessService:
 
     def process_for_ocr(self, image, preserve_details=False):
         """
-        Applies stable grayscale preprocessing.
-        Caps width at 2000px to ensure sub-2s latency on 4K systems.
+        Applies aggressive preprocessing for difficult transparent backgrounds.
+        Uses refined HSV masking to isolate text while minimizing UI artifacts.
         """
-        with Benchmark("Image Preprocessing (Capped)"):
+        with Benchmark("Image Preprocessing (Refined HSV)"):
             h, w = image.shape[:2]
             
-            # 1. Scaling (Crucial for Speed on 4K)
-            # We cap width at 2000px. This is high enough for Japanese
-            # but low enough to avoid PaddleOCR lag spikes.
-            MAX_W = 2000
-            scale = 1.0
-            
-            if w > MAX_W:
-                scale = MAX_W / w
-            elif w < 1000:
-                scale = 2.0 # Upscale small regions
-            
-            if scale != 1.0:
-                image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+            # 1. High-Quality Scaling
+            target_w = 2500
+            scale = target_w / w
+            image = cv2.resize(image, (target_w, int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
 
-            # 2. Grayscale & Contrast
+            # 2. HSV Color Isolation
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            
+            # White Text: Targeted range to avoid bright background elements
+            white_mask = cv2.inRange(hsv, (0, 0, 180), (180, 60, 255))
+            
+            # Player Colors: Lower saturation threshold to capture more text
+            color_mask = cv2.inRange(hsv, (0, 50, 50), (180, 255, 255))
+            
+            # Combine masks
+            combined_mask = cv2.bitwise_or(white_mask, color_mask)
+            
+            # 3. Apply mask to grayscale
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-            processed = clahe.apply(gray)
+            masked_gray = cv2.bitwise_and(gray, gray, mask=combined_mask)
 
-            # 3. Denoise
-            processed = cv2.bilateralFilter(processed, 9, 75, 75)
+            # 4. Add Margin Padding
+            processed = cv2.copyMakeBorder(masked_gray, 40, 40, 60, 40, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+
+            # 5. Contrast Enhancement (Lower clipLimit to avoid halo artifacts)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            processed = clahe.apply(processed)
+
+            # 6. Denoising
+            # Removes small artifacts without being as destructive as Morph Open
+            processed = cv2.bilateralFilter(processed, 5, 60, 60)
+            
+            # 7. Subtle Sharpening (Avoids 'shimmer' artifacts)
+            sharpen_kernel = np.array([[0, -0.5, 0], [-0.5, 3, -0.5], [0, -0.5, 0]])
+            processed = cv2.filter2D(processed, -1, sharpen_kernel)
 
         return processed
 

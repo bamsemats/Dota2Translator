@@ -1,7 +1,12 @@
-import tkinter as tk
-from tkinter import ttk, font
-import threading
 import os
+os.environ["FLAGS_enable_pir_api"] = "0"
+os.environ["PADDLE_DISABLE_ONEDNN"] = "1"
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import tkinter as tk
+from tkinter import ttk, font, messagebox
+import threading
 import re # Added for chat parsing
 import subprocess
 import ctypes
@@ -20,8 +25,9 @@ from PIL import ImageTk, Image # Added for image display
 
 from screenshot_utils import RegionSelector, ScreenCapture
 from config import AppConfig
-from ocr_pipeline import OcrPipeline
+from surgical_ocr_pipeline import SurgicalOcrPipeline
 from translate.translation_service import TranslationService
+from translate.anthropic_service import AnthropicTranslationService
 from google_oauth_service import GoogleOAuthService
 from keybinding_service import KeybindingService
 
@@ -79,14 +85,21 @@ class DotaChatTranslatorApp:
         self.target_lang = self.config.get_target_lang()
         self.ocr_langs_str = self.config.get_ocr_langs()
         self.ocr_dashboard_str = self.config.get_ocr_dashboard()
+        self.anthropic_api_key = self.config.get_anthropic_api_key()
 
         # Google services
         self.google_oauth_service = GoogleOAuthService(self.update_notification)
         self.credentials = None
 
         self.translation_service = TranslationService(self.google_cloud_project_id, target_lang=self.target_lang)
-        self.ocr_pipeline = OcrPipeline(self.config)
+        self.anthropic_service = AnthropicTranslationService(self.anthropic_api_key, target_lang=self.target_lang) if self.anthropic_api_key else None
+        
+        self.ocr_pipeline = SurgicalOcrPipeline(self.config)
         self.ocr_pipeline.set_translation_service(self.translation_service)
+        
+        # FIX: Pass app reference for lazy injection since anthropic_service is late-bound
+        self.ocr_pipeline._app_ref = self
+        print(f"App reference passed to ocr_pipeline for lazy injection.")
         
         # Memory of seen senders to help parse colon-less lines
         self.sender_registry = set() 
@@ -96,6 +109,12 @@ class DotaChatTranslatorApp:
         # Hotkey listener
         self.keybinding_service = KeybindingService(self.take_snapshot, self.hotkey_str)
         self.keybinding_service.start_listener()
+        
+        # Add F7 for calibration
+        self.calibration_listener = keyboard.GlobalHotKeys({
+            '<f7>': self.trigger_calibration
+        })
+        self.calibration_listener.start()
 
         self.last_screenshot_pil = None 
         self.last_screenshot_tk = None 
@@ -106,8 +125,8 @@ class DotaChatTranslatorApp:
 
         self.authorize_google_cloud_startup()
 
-        # Apply OCR languages from config on startup
-        self.set_ocr_langs(self.ocr_langs_str)
+        # REMOVED double initialization: SurgicalOcrPipeline handles its own init
+        # self.set_ocr_langs(self.ocr_langs_str)
 
         self.show_startup_status()
 
@@ -115,6 +134,17 @@ class DotaChatTranslatorApp:
         if self.config.get_first_run():
             self._open_readme_file()
             self.config.set_first_run(False)
+
+    def trigger_calibration(self):
+        """
+        Callback for F7 calibration hotkey.
+        """
+        if self.chat_region:
+            self.safe_notify("Calibration capture triggered (F7)...")
+            # Run in thread to not block UI
+            threading.Thread(target=lambda: self.ocr_pipeline.calibrate(self.chat_region), daemon=True).start()
+        else:
+            self.safe_notify("Cannot calibrate: No region selected.")
 
     def register_sender(self, sender):
         """
@@ -133,10 +163,13 @@ class DotaChatTranslatorApp:
         header_frame = ttk.Frame(self.main_frame)
         header_frame.pack(fill=tk.X, pady=(0, 15))
 
+        # Define larger font for UI elements (NOT the chat font)
+        self.ui_font = (self.current_font_family, 11) # Base size is 9, so 11 is +2pt
+
         self.notification_label = ttk.Label(
             header_frame,
             text="Ready",
-            font=(self.current_font_family, 9),
+            font=self.ui_font,
             anchor="w"
         )
         self.notification_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -144,17 +177,16 @@ class DotaChatTranslatorApp:
         button_frame = ttk.Frame(header_frame)
         button_frame.pack(side=tk.RIGHT)
 
+        # Style for standard buttons
+        style = ttk.Style()
+        style.configure("TButton", font=self.ui_font)
+        style.configure("Accent.TButton", font=self.ui_font)
+
         ttk.Button(
             button_frame,
             text="Snapshot",
             style="Accent.TButton",
             command=self.take_snapshot
-        ).pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(
-            button_frame,
-            text="Reprocess",
-            command=self.reprocess_last_snapshot
         ).pack(side=tk.LEFT, padx=5)
 
         ttk.Button(
@@ -248,9 +280,22 @@ class DotaChatTranslatorApp:
     def apply_font_settings(self, family, size):
         self.current_font_family = family
         self.current_font_size = size
-        new_font = font.Font(family=family, size=size)
-        self.translation_display.config(font=new_font)
+        
+        # Create a new font object for the chat widget
+        chat_font = font.Font(family=family, size=size)
+        
+        # Update the main Text widget configuration
+        self.translation_display.configure(font=chat_font)
+        
+        # Re-configure all tags with the new font family and size
+        # This is critical because tags can override the base widget font
         self.translation_display.tag_configure("bold", font=(family, size, "bold"))
+        self.translation_display.tag_configure("sender_tag", font=(family, size, "bold"))
+        self.translation_display.tag_configure("message_tag", font=(family, size))
+        self.translation_display.tag_configure("allies_tag", font=(family, size))
+        self.translation_display.tag_configure("original_tag", font=(family, size))
+        
+        # Save to config
         self.config.set_font_family(family)
         self.config.set_font_size(size)
 
@@ -565,7 +610,8 @@ class DotaChatTranslatorApp:
             self.ocr_langs_str,
             self.set_ocr_langs,
             self.ocr_dashboard_str,
-            self.set_ocr_dashboard
+            self.set_ocr_dashboard,
+            self.recalibrate_geometry
         )
 
 
@@ -583,9 +629,20 @@ class DotaChatTranslatorApp:
             self.chat_region = region
             self.config.set_chat_region(region)
             self.update_notification(f"Region set: {region}")
+            # Automatic Calibration
+            self.recalibrate_geometry()
         else:
             self.update_notification("Selection cancelled.")
 
+    def recalibrate_geometry(self):
+        if self.chat_region:
+            self.update_notification("Auto-calibrating geometry...")
+            res = self.ocr_pipeline.calibrate(self.chat_region)
+            if "WARNING" in res:
+                tk.messagebox.showwarning("Calibration", res)
+            self.update_notification(res)
+        else:
+            self.update_notification("No region set to calibrate.")
 
 # =====================================================
 # HOTKEY
@@ -641,7 +698,7 @@ class DotaChatTranslatorApp:
         else:
             primary_lang = mapped_langs[0]
             
-        self.ocr_pipeline.ocr_service.set_language(primary_lang)
+        self.ocr_pipeline.set_language(primary_lang)
         self.update_notification(f"Multilingual OCR ready (Model: {primary_lang})")
 
     def set_ocr_dashboard(self, dashboard_str):
@@ -726,11 +783,12 @@ class SettingsWindow(tk.Toplevel):
         current_ocr_langs,
         set_ocr_langs_cb,
         current_ocr_dashboard,
-        set_ocr_dashboard_cb
+        set_ocr_dashboard_cb,
+        recalibrate_cb
     ):
         super().__init__(master)
         self.title("Settings")
-        self.geometry("540x850") # Increased height for more settings
+        self.geometry("540x950") # Increased height for Anthropic API
         self.resizable(False, False)
         self.grab_set()
 
@@ -743,6 +801,7 @@ class SettingsWindow(tk.Toplevel):
         self.set_target_lang = set_target_lang_cb
         self.set_ocr_langs = set_ocr_langs_cb
         self.set_ocr_dashboard = set_ocr_dashboard_cb
+        self.recalibrate = recalibrate_cb
 
         # Match theme background
         bg_color = "#313338" if current_theme == "Dark" else "#F2F3F5"
@@ -772,7 +831,7 @@ class SettingsWindow(tk.Toplevel):
         # Region
         self.select_region_cb = select_region_cb
 
-        region_frame = ttk.LabelFrame(self.main, text="Chat Region", padding=10)
+        region_frame = ttk.LabelFrame(self.main, text="Chat Region & Geometry", padding=10)
         region_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
 
         ttk.Button(
@@ -781,6 +840,14 @@ class SettingsWindow(tk.Toplevel):
             style="Accent.TButton",
             command=self._on_select_region_button_click
         ).pack(fill=tk.X, pady=5)
+
+        ttk.Button(
+            region_frame,
+            text="Recalibrate Chat Geometry",
+            command=self.recalibrate
+        ).pack(fill=tk.X, pady=5)
+
+        ttk.Label(region_frame, text="Make sure 2-3 lines are visible in chat before recalibrating.", font=("", 8), foreground="grey").pack(pady=2)
 
         # Languages
         lang_frame = ttk.LabelFrame(self.main, text="Languages", padding=10)
@@ -898,8 +965,26 @@ class SettingsWindow(tk.Toplevel):
         theme_combo.pack(fill=tk.X)
         theme_combo.bind("<<ComboboxSelected>>", lambda e: self.update_theme())
 
+        # Anthropic API
+        anthropic_frame = ttk.LabelFrame(self.main, text="Anthropic API (Claude Vision)", padding=10)
+        anthropic_frame.pack(fill=tk.X, padx=20, pady=10)
+
+        ttk.Label(anthropic_frame, text="API Key").pack(anchor="w")
+        self.anthropic_key_var = tk.StringVar(value=config.get_anthropic_api_key())
+        ttk.Entry(
+            anthropic_frame,
+            textvariable=self.anthropic_key_var,
+            show="*" # Mask the key
+        ).pack(fill=tk.X, pady=(2, 8))
+
+        ttk.Button(
+            anthropic_frame,
+            text="Save Anthropic Key",
+            command=self.save_anthropic_key
+        ).pack(fill=tk.X)
+
         # Google Cloud
-        gcp_frame = ttk.LabelFrame(self.main, text="Google Cloud API", padding=10)
+        gcp_frame = ttk.LabelFrame(self.main, text="Google Cloud API (Legacy)", padding=10)
         gcp_frame.pack(fill=tk.X, padx=20, pady=10)
 
         ttk.Label(gcp_frame, text="Project ID").pack(anchor="w")
@@ -1013,7 +1098,7 @@ class SettingsWindow(tk.Toplevel):
 
     def save_target_lang(self, event=None):
         name = self.target_lang_var.get()
-        lang_obj = next((l for l in SUPPORTED_LANGUAGES if l["name"] == name), None)
+        lang_obj = next((l for l in SUPPORTED_LANGUAGES if l["iso"] == current_target_lang), None)
         if lang_obj:
             self.set_target_lang(lang_obj["iso"])
             self.notify(f"Target language set to {name}")
@@ -1061,6 +1146,13 @@ class SettingsWindow(tk.Toplevel):
         pid = self.project_id.get()
         self.config.set_project_id(pid)
         self.notify("Project ID saved.")
+
+    def save_anthropic_key(self):
+        key = self.anthropic_key_var.get().strip()
+        self.config.set_anthropic_api_key(key)
+        # Inform user to restart for change to take effect
+        self.notify("Anthropic Key saved. Please restart the app.")
+        messagebox.showinfo("Anthropic API", "API key saved successfully.\nPlease restart the application to enable Claude Vision OCR.")
 
 
 # =====================================================

@@ -10,74 +10,77 @@ class ChatParser:
 
     def parse_line(self, chat_line):
         """
-        Parses a raw OCR line into tag, sender, and message.
+        Dota 2 Structural Parser:
+        Expected format: [Channel] #w Sender [Tag] : Message
+        Example: [Allies] #w bamsemats [DT] : help me
         """
         parsed = {
-            "tag": None,
+            "channel": None,
             "sender": None,
-            "message": chat_line.strip()
+            "tag": None,
+            "message": chat_line.strip(),
+            "is_structured": False
         }
-
-        temp_line = chat_line.strip()
-
-        # 1. Tag Detection
-        # Matches [Allies], (Allies), [All], [Team], [Squelched], etc.
-        tag_pattern = r"^[\[\(]?(Allies|Team|All|Squelch\w*|Party)[\]\)]?\s*(.*)"
-        tag_match = re.search(tag_pattern, temp_line, re.IGNORECASE)
         
-        if tag_match:
-            parsed["tag"] = tag_match.group(1).capitalize()
-            temp_line = tag_match.group(2).strip()
-        else:
-            loose_tag_match = re.search(r"(Allies|All|Team|Party)", temp_line[:15], re.IGNORECASE)
-            if loose_tag_match:
-                parsed["tag"] = loose_tag_match.group(1).capitalize()
-                temp_line = re.sub(r"^[^\w\d]*" + re.escape(loose_tag_match.group(0)) + r"[^\w\d]*", "", temp_line, flags=re.IGNORECASE).strip()
+        # 1. Pre-processing: Correct common OCR bracket/keyword misreads
+        line = chat_line.strip()
+        
+        # Issue 3: missing leading bracket on [Allies] etc.
+        # if a line starts with Allies] or llies], prepend [
+        if re.match(r"^(?:Allies|llies|Party|arty|Team|eam|All)\]", line, re.IGNORECASE):
+            line = "[" + line
 
-        # 2. Sender Detection
-        # Look for delimiters like : ; ! |
-        # We also check if the text before the delimiter is a likely name (1-20 chars, mostly alnum)
-        sender_match = re.search(r"^([^:;!\|]{1,25})[:;!\|](.*)", temp_line)
-        if not sender_match:
-            # Fallback for dots or common colon misreads as 'i' or 'l' after a name-like structure
-            sender_match = re.search(r"^([^:;]{1,25}[\]\)])[\.\sil](.*)", temp_line)
+        # Fix [Allies] / [All]
+        line = re.sub(r"[f\[\(]{1,2}(All[ie\s\|1]{1,4}s|All)[\]\)J]{1,2}", "[Allies]", line, flags=re.IGNORECASE)
+        # Fix [Party]
+        line = re.sub(r"[f\[\(]{1,2}Party[\]\)J]{1,2}", "[Party]", line, flags=re.IGNORECASE)
+        # Fix [DT] tag
+        line = re.sub(r"[f\[\(]{1,2}DT[\]\)J]{1,2}", "[DT]", line)
+        
+        # 2. Structural Regex
+        # Pattern: [Channel] (optional #w) Sender (optional [Tag]) : Message
+        # Refined: Handle '#w' or similar markers more flexibly.
+        # Issue 2: Capture #w and [DT] as part of the sender if they aren't separated by colons.
+        # New pattern tries to include #w and trailing tags like [DT] into the sender capture if possible.
+        struct_pattern = r"^\[(Allies|Party|Team|All)\]\s*((?:#\w\s+)?.*?(?:\s+\[[^\]]+\])?)\s*[:;!\|]\s*(.*)"
+        match = re.match(struct_pattern, line, re.IGNORECASE)
+        
+        if match:
+            parsed["channel"] = match.group(1).capitalize()
+            parsed["sender"] = match.group(2).strip()
+            # Try to extract sub-tag if present (e.g. [DT])
+            tag_match = re.search(r"\[([^\]]+)\]$", parsed["sender"])
+            if tag_match:
+                parsed["tag"] = tag_match.group(1)
+                # We keep it in the sender as requested by "Issue 2" implied behavior 
+                # (if #w bamsemats [DT] is the sender, we capture it all)
             
-        if not sender_match:
-            # Look for a space and a dot (common misread of ' :')
-            sender_match = re.search(r"^([^:;]{1,25})\s\.(.*)", temp_line)
-
-        if sender_match:
-            potential_sender = sender_match.group(1).strip()
-            message_part = sender_match.group(2).strip()
-
-            # Robust validation: Sender should have at least one letter/digit 
-            # and shouldn't be too long or just symbols
-            if 1 <= len(potential_sender) <= 25 and any(c.isalnum() for c in potential_sender):
-                parsed["sender"] = potential_sender
-                parsed["message"] = message_part
-                self.register_sender(potential_sender)
-            else:
-                parsed["message"] = temp_line
+            parsed["message"] = match.group(3).strip()
+            parsed["is_structured"] = True
+            self.register_sender(parsed["sender"])
         else:
-            # Check against registry
-            words = temp_line.split(" ")
-            if words:
-                first_word = words[0].rstrip(":;,. ").strip()
-                if first_word.lower() in self.sender_registry:
-                    parsed["sender"] = first_word
-                    parsed["message"] = " ".join(words[1:]).strip()
-                elif parsed["tag"] and len(words) > 1:
-                    # If we have a tag, the first word is almost certainly a sender
-                    potential_sender = words[0].strip()
-                    if 1 <= len(potential_sender) <= 20 and any(c.isalnum() for c in potential_sender):
-                        parsed["sender"] = potential_sender
-                        parsed["message"] = " ".join(words[1:]).strip()
-                        self.register_sender(potential_sender)
+            # Fallback to existing loose parsing if strict structure fails
+            temp_line = line
+            # Check for channel tag anywhere if strict match failed
+            tag_match = re.search(r"(\[(Allies|Party|Team|All)\])", temp_line, re.IGNORECASE)
+            if tag_match:
+                parsed["channel"] = tag_match.group(2).capitalize()
+                temp_line = temp_line.replace(tag_match.group(1), "").strip()
+            
+            # Clean optional prefix like #w before loose sender extraction
+            temp_line = re.sub(r"^#\w\s+", "", temp_line)
+            
+            sender_match = re.search(r"^([^:;!\|]{1,45})[:;!\|](.*)", temp_line)
+            if sender_match:
+                parsed["sender"] = sender_match.group(1).strip()
+                parsed["message"] = sender_match.group(2).strip()
+                # Try to extract [Tag] from sender if it's there
+                tag_in_sender = re.search(r"\[([^\]]+)\]$", parsed["sender"])
+                if tag_in_sender:
+                    parsed["tag"] = tag_in_sender.group(1)
+                    parsed["sender"] = parsed["sender"].replace(tag_in_sender.group(0), "").strip()
+                self.register_sender(parsed["sender"])
 
-        # Final cleanup
-        parsed["message"] = re.sub(r"^[ :;.,\.]+", "", parsed["message"]).strip()
-        
-        if len(parsed["message"]) < 2 and not any(c.isalnum() for c in parsed["message"]):
-             parsed["message"] = ""
-
+        # Final message cleanup
+        parsed["message"] = re.sub(r"^[ :;.,\.\!\|\]\)\}-]+", "", parsed["message"]).strip()
         return parsed

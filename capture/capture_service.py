@@ -5,7 +5,7 @@ from utils.benchmark import Benchmark
 
 class CaptureService:
     def __init__(self):
-        self.sct = mss.mss()
+        pass
 
     def capture_single_frame(self, region):
         """
@@ -13,8 +13,9 @@ class CaptureService:
         """
         x, y, w, h = region
         monitor = {"top": y, "left": x, "width": w, "height": h}
-        screenshot = self.sct.grab(monitor)
-        return np.array(screenshot)[:, :, :3]
+        with mss.mss() as sct:
+            screenshot = sct.grab(monitor)
+            return np.array(screenshot)[:, :, :3]
 
     def capture_frames(self, region, num_frames=3, interval_ms=10):
         """
@@ -26,12 +27,13 @@ class CaptureService:
         frames = []
         
         with Benchmark(f"Capturing {num_frames} frames"):
-            for i in range(num_frames):
-                screenshot = self.sct.grab(monitor)
-                # Convert to numpy array (BGRA to BGR)
-                img = np.array(screenshot)[:, :, :3]
-                frames.append(img)
-                if i < num_frames - 1 and interval_ms > 0:
-                    time.sleep(interval_ms / 1000.0)
+            with mss.mss() as sct:
+                for i in range(num_frames):
+                    screenshot = sct.grab(monitor)
+                    # Convert to numpy array (BGRA to BGR)
+                    img = np.array(screenshot)[:, :, :3]
+                    frames.append(img)
+                    if i < num_frames - 1 and interval_ms > 0:
+                        time.sleep(interval_ms / 1000.0)
         
         return frames

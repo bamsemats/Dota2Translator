@@ -10,3 +10,4 @@ google-cloud-translate
 google-auth-oauthlib
 PyJWT
 langdetect
+langid

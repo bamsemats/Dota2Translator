@@ -1,0 +1,14 @@
+{
+  "description": "Default configuration for Dota 2",
+  "parser_regex": "^\\[?(?:Allies|All|Team|Party)\\]?\\s*(.+?)\\s*(?:\\[\\w+\\])?\\s*[:;\\)]\\s*(.+)",
+  "system_keywords": [
+    "bought back",
+    "killed",
+    "has",
+    "tipped",
+    "just"
+  ],
+  "sender_group": 1,
+  "message_group": 2,
+  "tag_label": "Allies"
+}
