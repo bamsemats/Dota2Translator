@@ -1,9 +1,4 @@
 import os
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["PADDLE_DISABLE_ONEDNN"] = "1"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
 from capture.capture_service import CaptureService
 from preprocess.preprocess_service import PreprocessService
 from usage_tracker import UsageTracker
@@ -11,10 +6,7 @@ import cv2
 import numpy as np
 import re
 import json
-import anthropic
-import time
 import base64
-from paddleocr import PaddleOCR
 from config import AppConfig
 import logging
 
@@ -25,12 +17,8 @@ logger = logging.getLogger(__name__)
 CALIBRATION_FILE = "calibration.json"
 CHAT_FORMAT_FILE = "chat_format.json"
 
-# Module-level OCR instance to ensure it's created exactly once
-GLOBAL_OCR = None
-
 class SurgicalOcrPipeline:
     def __init__(self, config=None):
-        global GLOBAL_OCR
         self.config = config if config else AppConfig()
         self.capture_service = CaptureService()
         self.preprocess_service = PreprocessService()
@@ -52,19 +40,6 @@ class SurgicalOcrPipeline:
         }
         self.load_calibration()
         self.load_chat_format()
-
-        # Initialize GLOBAL_OCR (Detection Only)
-        if GLOBAL_OCR is None:
-            logger.info("PaddleOCR instance created (Detection Only)")
-            GLOBAL_OCR = PaddleOCR(
-                lang='en', 
-                device='cpu',
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-                enable_mkldnn=False
-            )
-        self.ocr = GLOBAL_OCR
         self.lang = 'en'
 
     def load_calibration(self):
@@ -168,16 +143,8 @@ class SurgicalOcrPipeline:
         self.anthropic_service = anthropic_service
 
     def set_language(self, lang):
-        global GLOBAL_OCR
-        if GLOBAL_OCR is not None and hasattr(self, 'lang') and self.lang == lang:
-            return
         self.lang = lang
-        logger.info(f"Switching language to {lang}")
-        GLOBAL_OCR = PaddleOCR(
-            lang=lang, device='cpu', enable_mkldnn=False,
-            use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False
-        )
-        self.ocr = GLOBAL_OCR
+        logger.info(f"Target language context set to {lang}")
 
     def run(self, region, enabled_iso=None, on_first_frame=None):
         # Lazy anthropic service injection
@@ -214,10 +181,6 @@ class SurgicalOcrPipeline:
 
             if x2 == w_orig:
                 logger.warning("WARNING: chat_right hits frame boundary — some text may be cut off")
-
-            if i == 0:
-                print(f"Crop: x={x1}, y={y1}, w={x2-x1}, h={y2-y1}")
-                cv2.imwrite("debug_slice_0.png", img[y1:y2, x1:x2])
 
             if y1 >= y2 or x1 >= x2: continue
 
@@ -298,7 +261,6 @@ class SurgicalOcrPipeline:
 
         # Final Formatting
         final_output = []
-        print(f"anthropic_service is: {self.anthropic_service}")
         for struct in struct_results:
             msg = struct["message"]
             translation = struct["translation"]
@@ -310,20 +272,15 @@ class SurgicalOcrPipeline:
             tag, user = struct["tag"], struct["sender"]
             
             # --- DYNAMIC POST-TRANSLATION CLEANUP ---
-            # Strip exact detected sender if it leaks into translation
             if user:
-                # 1. Strip the exact user string (e.g. "#w bamsemats [DT]")
                 translation = re.sub(f"^{re.escape(user)}\\s*[:;\\)]?\\s*", "", translation, flags=re.IGNORECASE).strip()
-                # 2. Also try stripping common name variants (like name without the clan tag)
                 if "[" in user:
                     clean_name = user.split("[")[0].strip()
                     translation = re.sub(f"^{re.escape(clean_name)}\\s*[:;\\)]?\\s*", "", translation, flags=re.IGNORECASE).strip()
 
-            # 3. Strip generic channel tags if they leak (e.g., "[Allies]")
             if tag:
                 translation = re.sub(f"^\\[{re.escape(tag)}\\]\\s*", "", translation, flags=re.IGNORECASE).strip()
             
-            # 4. Final safety: Strip anything matching the generic [Tag] sender: pattern
             translation = re.sub(r"^[\[\(]?(?:Allies|All|Team|Party)[\]\)]?\s*[^:]+[:;]\s*", "", translation, flags=re.IGNORECASE).strip()
 
             prefix = f"[{tag}] " if tag else ""

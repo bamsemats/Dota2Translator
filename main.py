@@ -1,8 +1,4 @@
 import os
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["PADDLE_DISABLE_ONEDNN"] = "1"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import tkinter as tk
 from tkinter import ttk, font, messagebox
@@ -68,7 +64,7 @@ PADDLE_LANG_CATALOG = {
 class DotaChatTranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"Dota 2 Chat Translator v{__version__} (PaddleOCR)")
+        self.root.title(f"Dota 2 Chat Translator v{__version__} (Claude Vision)")
         self.root.geometry("1600x900")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -99,6 +95,9 @@ class DotaChatTranslatorApp:
         self.ocr_pipeline = SurgicalOcrPipeline(self.config)
         self.ocr_pipeline.set_translation_service(self.translation_service)
         
+        # Ensure client_secret.json exists (copy from template if needed)
+        self._ensure_client_secret_exists()
+
         # FIX: Pass app reference for lazy injection since anthropic_service is late-bound
         self.ocr_pipeline._app_ref = self
         print(f"App reference passed to ocr_pipeline for lazy injection.")
@@ -125,7 +124,9 @@ class DotaChatTranslatorApp:
         self.apply_font_settings(self.current_font_family, self.current_font_size)
         self.set_theme(self.current_theme)
 
-        self.authorize_google_cloud_startup()
+        # Removed automated Google OAuth on startup to prevent unwanted browser redirects.
+        # Users can still authorize manually via the Settings menu if they wish to use legacy Google Translate.
+        # self.authorize_google_cloud_startup()
 
         self.show_startup_status()
 
@@ -338,23 +339,62 @@ class DotaChatTranslatorApp:
         self.config.set_font_size(size)
 
     def authorize_google_cloud_startup(self):
-        self.credentials = self.google_oauth_service.authorize()
-        if self.credentials:
-            self.translation_service.initialize_client(self.credentials)
+        # Only attempt if secret exists, otherwise skip silently to avoid startup crash
+        secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_secret.json")
+        if os.path.exists(secret_path):
+            try:
+                self.credentials = self.google_oauth_service.authorize()
+                if self.credentials:
+                    self.translation_service.initialize_client(self.credentials)
+            except Exception as e:
+                print(f"Optional Google Cloud authorization failed: {e}")
+        else:
+            print("Google client_secret.json not found. Skipping optional Google Cloud auth.")
 
     def show_startup_status(self):
         if not self.chat_region:
             self.update_notification("No chat region set.")
-        elif not self.google_cloud_project_id:
-            self.update_notification("Set Google Cloud Project ID.")
-        elif not self.credentials:
-            self.update_notification("Authorize Google Cloud.")
+        elif not self.anthropic_api_key:
+            self.update_notification("Anthropic API key missing (Claude Vision disabled).")
         else:
             self.update_notification("Ready.")
 
     def on_closing(self):
         self.keybinding_service.stop_listener()
         self.root.destroy()
+
+    def _ensure_client_secret_exists(self):
+        """Ensures client_secret.json exists, copying from template if needed."""
+        import sys
+        if getattr(sys, 'frozen', False):
+            # In --onedir mode, sys.executable is in the folder with other files
+            base_dir = os.path.dirname(sys.executable)
+            # However, templates might be in the _internal folder if PyInstaller put them there.
+            # PyInstaller 6+ with --onedir usually keeps data files in the root or _internal
+            template_dir = getattr(sys, '_MEIPASS', base_dir)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            template_dir = base_dir
+
+        target = os.path.join(base_dir, "client_secret.json")
+        template = os.path.join(template_dir, "client_secret_template.json")
+        
+        if not os.path.exists(target):
+            if os.path.exists(template):
+                import shutil
+                try:
+                    shutil.copy(template, target)
+                    print(f"Created client_secret.json from template at {target}")
+                except Exception as e:
+                    print(f"Failed to copy client_secret template: {e}")
+            else:
+                # Create a very basic one so the library doesn't crash immediately
+                try:
+                    with open(target, 'w') as f:
+                        f.write('{"installed":{"client_id":"MISSING","project_id":"MISSING","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}}')
+                    print(f"Created empty client_secret.json at {target}")
+                except Exception as e:
+                    print(f"Failed to create empty client_secret: {e}")
 
     def _open_readme_file(self):
         readme_path = os.path.join(os.path.dirname(__file__), "README.md")
@@ -369,12 +409,8 @@ class DotaChatTranslatorApp:
             self.update_notification("No chat region selected.")
             return
 
-        if not self.google_cloud_project_id:
-            self.update_notification("Google Cloud Project ID missing.")
-            return
-
-        if not self.translation_service.client:
-            self.update_notification("Google Cloud not authorized.")
+        if not self.anthropic_api_key:
+            self.update_notification("Anthropic API key missing.")
             return
 
         self.update_notification("Starting capture...")
@@ -390,7 +426,7 @@ class DotaChatTranslatorApp:
 
     def run_ocr_pipeline(self, deep_scan=False):
         try:
-            self.safe_notify("Processing (PaddleOCR)...")
+            self.safe_notify("Processing (Claude Vision)...")
             
             # Get active ISO codes for better language detection
             active_iso = []

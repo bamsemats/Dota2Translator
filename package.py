@@ -15,13 +15,11 @@ ADD_DATA.append((os.path.join(os.path.dirname(__file__), "theme"), "theme"))
 ADD_DATA.append((os.path.join(os.path.dirname(__file__), "chat_format.json"), "."))
 ADD_DATA.append((os.path.join(os.path.dirname(__file__), "version.py"), "."))
 ADD_DATA.append((os.path.join(os.path.dirname(__file__), "README.md"), "."))
+ADD_DATA.append((os.path.join(os.path.dirname(__file__), "client_secret_template.json"), "."))
 
-# Add client_secret.json (use template if actual one is missing)
+# Only add client_secret.json if it exists locally
 if os.path.exists("client_secret.json"):
     ADD_DATA.append((os.path.join(os.path.dirname(__file__), "client_secret.json"), "."))
-else:
-    ADD_DATA.append((os.path.join(os.path.dirname(__file__), "client_secret_template.json"), "."))
-    # Note: Inno Setup or the app should handle renaming template to actual if needed
 
 def build_app():
     # Clean up previous build artifacts
@@ -43,13 +41,14 @@ def build_app():
     pyinstaller_args = [
         SCRIPT_NAME,
         "--name", APP_NAME,
-        "--onedir", # Directory mode for faster startup
-        "--windowed", # Suppresses the console window
+        "--onedir", 
+        "--windowed", 
         "--clean",
         "--noconfirm",
-        # Important for PaddleOCR: hidden imports
+        # Minimal hidden imports
         "--hidden-import=pynput.keyboard._win32",
         "--hidden-import=pynput.mouse._win32",
+        "--collect-all", "chardet", # Still useful for requests
     ]
 
     if ICON_PATH:

@@ -13,13 +13,20 @@ A high-fidelity, surgical screen-capture tool that translates in-game chat in re
 
 ## Installation
 
-### Prerequisites
+### Method 1: Windows Installer (Recommended)
+1. Go to the [Releases](https://github.com/bamsemats/Dota2Translator/releases) page.
+2. Download the latest `Dota2ChatTranslator_Setup.exe`.
+3. Run the installer. It will install the app and create a desktop shortcut.
+4. **Auto-Updates**: The app will automatically check for newer versions on startup and notify you if an update is available.
+
+### Method 2: Manual (Developer)
+#### Prerequisites
 - Python 3.13 (Recommended)
 - Windows OS (Tested on Win32)
 - Anthropic API Key (with credits)
 - Google Cloud Project ID (Optional, for legacy Google Translate support)
 
-### Setup
+#### Setup
 1. Clone the repository.
 2. Install dependencies:
    ```bash

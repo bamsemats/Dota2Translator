@@ -4,14 +4,25 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
+import sys
+
 # Scopes required for Google Cloud Vision and Translation APIs
 SCOPES = ['https://www.googleapis.com/auth/cloud-platform']
 
+# Use absolute paths that work in both dev and PyInstaller (frozen) environments
+if getattr(sys, 'frozen', False):
+    # If the application is run as a bundle, the PyInstaller bootloader
+    # sets the sys._MEIPASS attribute which is the path to the bundle folder.
+    # In --onedir mode, this is the folder where the .exe lives.
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Path to the client secrets file
-CLIENT_SECRETS_FILE = 'client_secret.json'
+CLIENT_SECRETS_FILE = os.path.join(BASE_DIR, 'client_secret.json')
 
 # Directory to store user's tokens
-TOKEN_STORAGE_DIR = 'tokens'
+TOKEN_STORAGE_DIR = os.path.join(BASE_DIR, 'tokens')
 TOKEN_FILE = os.path.join(TOKEN_STORAGE_DIR, 'token.json')
 
 class GoogleOAuthService:

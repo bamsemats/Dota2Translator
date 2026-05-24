@@ -1,6 +1,6 @@
 ; Inno Setup Script for Dota 2 Chat Translator
 #define MyAppName "Dota2ChatTranslator"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Bamsemats"
 #define MyAppURL "https://github.com/bamsemats/Dota2Translator"
 #define MyAppExeName "Dota2ChatTranslator.exe"
