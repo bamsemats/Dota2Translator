@@ -11,3 +11,4 @@ google-auth-oauthlib
 PyJWT
 langdetect
 langid
+requests

@@ -5,30 +5,23 @@ import shutil
 # --- Configuration ---
 SCRIPT_NAME = "main.py"
 APP_NAME = "Dota2ChatTranslator"
-ICON_PATH = None # Optional: path to .ico file, e.g., "icon.ico"
-ADD_DATA = [] # List of (source, destination_in_bundle) tuples
+ICON_PATH = None # Optional: path to .ico file
+ADD_DATA = []
 
 # Add custom theme files
-# You need to download forest-dark.tcl and forest-light.tcl and place them in your project root
-ADD_DATA.append((os.path.join(os.path.dirname(__file__), "forest-dark.tcl"), "."))
-ADD_DATA.append((os.path.join(os.path.dirname(__file__), "forest-light.tcl"), "."))
+ADD_DATA.append((os.path.join(os.path.dirname(__file__), "theme"), "theme"))
 
-# Add config.ini (if it exists, for initial setup)
-if os.path.exists("config.ini"):
-    ADD_DATA.append((os.path.join(os.path.dirname(__file__), "config.ini"), "."))
-else:
-    print("Warning: config.ini not found. It will be created on first run.")
+# Add config files and assets
+ADD_DATA.append((os.path.join(os.path.dirname(__file__), "chat_format.json"), "."))
+ADD_DATA.append((os.path.join(os.path.dirname(__file__), "version.py"), "."))
+ADD_DATA.append((os.path.join(os.path.dirname(__file__), "README.md"), "."))
 
-# Add token storage directory (if it exists)
-if os.path.exists("tokens"):
-    ADD_DATA.append((os.path.join(os.path.dirname(__file__), "tokens"), "tokens"))
-
-# Add client_secret.json (if it exists)
+# Add client_secret.json (use template if actual one is missing)
 if os.path.exists("client_secret.json"):
     ADD_DATA.append((os.path.join(os.path.dirname(__file__), "client_secret.json"), "."))
 else:
-    print("Warning: client_secret.json not found. OAuth will not work without it.")
-
+    ADD_DATA.append((os.path.join(os.path.dirname(__file__), "client_secret_template.json"), "."))
+    # Note: Inno Setup or the app should handle renaming template to actual if needed
 
 def build_app():
     # Clean up previous build artifacts
@@ -50,23 +43,24 @@ def build_app():
     pyinstaller_args = [
         SCRIPT_NAME,
         "--name", APP_NAME,
-        "--onefile", # Creates a single executable file
+        "--onedir", # Directory mode for faster startup
         "--windowed", # Suppresses the console window
-        "--clean", # Clean PyInstaller cache and remove temporary files
-        "--noconfirm", # Overwrite output directory without asking
+        "--clean",
+        "--noconfirm",
+        # Important for PaddleOCR: hidden imports
+        "--hidden-import=pynput.keyboard._win32",
+        "--hidden-import=pynput.mouse._win32",
     ]
 
-    # Add icon if provided
     if ICON_PATH:
         pyinstaller_args.extend(["--icon", ICON_PATH])
 
-    # Add --add-data arguments
     pyinstaller_args.extend(add_data_args)
 
     # Run PyInstaller
     pyi.run(pyinstaller_args)
 
-    print(f"PyInstaller build finished. Check the 'dist' folder for {APP_NAME}.exe")
+    print(f"PyInstaller build finished. Check 'dist/{APP_NAME}' folder.")
 
 if __name__ == "__main__":
     build_app()

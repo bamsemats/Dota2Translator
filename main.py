@@ -11,6 +11,8 @@ import re # Added for chat parsing
 import subprocess
 import ctypes
 import cv2
+import requests
+from version import __version__
 
 # Enable DPI awareness at the very beginning to fix layout and capture issues
 try:
@@ -66,7 +68,7 @@ PADDLE_LANG_CATALOG = {
 class DotaChatTranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Dota 2 Chat Translator (PaddleOCR)")
+        self.root.title(f"Dota 2 Chat Translator v{__version__} (PaddleOCR)")
         self.root.geometry("1600x900")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -125,15 +127,51 @@ class DotaChatTranslatorApp:
 
         self.authorize_google_cloud_startup()
 
-        # REMOVED double initialization: SurgicalOcrPipeline handles its own init
-        # self.set_ocr_langs(self.ocr_langs_str)
-
         self.show_startup_status()
 
         # Check for first run to open README
         if self.config.get_first_run():
             self._open_readme_file()
             self.config.set_first_run(False)
+
+        # Check for updates in the background
+        threading.Thread(target=self.check_for_updates, daemon=True).start()
+
+        # Prompt for missing API keys
+        if not self.anthropic_api_key:
+            self.root.after(2000, lambda: messagebox.showinfo("Anthropic API Key", 
+                "Anthropic API key is missing. Claude Vision OCR will be disabled.\n"
+                "Please go to Settings to add your key."))
+
+    def check_for_updates(self):
+        """Checks for new version on GitHub."""
+        try:
+            repo_url = "https://api.github.com/repos/bamsemats/Dota2Translator/releases/latest"
+            response = requests.get(repo_url, timeout=5)
+            if response.status_code == 200:
+                latest_release = response.json()
+                latest_version = latest_release.get("tag_name", "0.0.0").lstrip('v')
+                
+                if self.is_newer_version(__version__, latest_version):
+                    self.root.after(0, lambda: self.prompt_update(latest_version, latest_release.get("html_url")))
+        except Exception as e:
+            print(f"Update check failed: {e}")
+
+    def is_newer_version(self, current, latest):
+        """Simple semantic version comparison."""
+        try:
+            curr_parts = [int(p) for p in current.split('.')]
+            late_parts = [int(p) for p in latest.split('.')]
+            return late_parts > curr_parts
+        except:
+            return latest != current
+
+    def prompt_update(self, version, url):
+        """Prompts the user to update."""
+        if messagebox.askyesno("Update Available", 
+            f"A new version (v{version}) is available. Would you like to go to the download page?"):
+            import webbrowser
+            webbrowser.open(url)
 
     def trigger_calibration(self):
         """
@@ -969,7 +1007,11 @@ class SettingsWindow(tk.Toplevel):
         anthropic_frame = ttk.LabelFrame(self.main, text="Anthropic API (Claude Vision)", padding=10)
         anthropic_frame.pack(fill=tk.X, padx=20, pady=10)
 
-        ttk.Label(anthropic_frame, text="API Key").pack(anchor="w")
+        ant_label_row = ttk.Frame(anthropic_frame)
+        ant_label_row.pack(fill=tk.X)
+        ttk.Label(ant_label_row, text="API Key").pack(side=tk.LEFT)
+        ttk.Button(ant_label_row, text="?", width=2, command=self.show_anthropic_help).pack(side=tk.RIGHT)
+
         self.anthropic_key_var = tk.StringVar(value=config.get_anthropic_api_key())
         ttk.Entry(
             anthropic_frame,
@@ -987,7 +1029,11 @@ class SettingsWindow(tk.Toplevel):
         gcp_frame = ttk.LabelFrame(self.main, text="Google Cloud API (Legacy)", padding=10)
         gcp_frame.pack(fill=tk.X, padx=20, pady=10)
 
-        ttk.Label(gcp_frame, text="Project ID").pack(anchor="w")
+        gcp_label_row = ttk.Frame(gcp_frame)
+        gcp_label_row.pack(fill=tk.X)
+        ttk.Label(gcp_label_row, text="Project ID").pack(side=tk.LEFT)
+        ttk.Button(gcp_label_row, text="?", width=2, command=self.show_google_help).pack(side=tk.RIGHT)
+
         self.project_id = tk.StringVar(value=config.get_project_id())
         ttk.Entry(
             gcp_frame,
@@ -1008,6 +1054,48 @@ class SettingsWindow(tk.Toplevel):
             text="Authorize",
             command=self.authorize
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
+    def show_anthropic_help(self):
+        help_win = tk.Toplevel(self)
+        help_win.title("How to get an Anthropic API Key")
+        help_win.geometry("450x300")
+        help_win.resizable(False, False)
+        
+        txt = tk.Text(help_win, wrap=tk.WORD, padx=10, pady=10)
+        txt.pack(fill=tk.BOTH, expand=True)
+        
+        guide = (
+            "1. Go to https://console.anthropic.com/\n"
+            "2. Create an account and sign in.\n"
+            "3. Navigate to 'API Keys' in the dashboard.\n"
+            "4. Click 'Create Key' and give it a name.\n"
+            "5. Copy the key (starts with 'sk-ant-') and paste it here.\n\n"
+            "Note: You may need to add credits to your account to use the API."
+        )
+        txt.insert(tk.END, guide)
+        txt.config(state=tk.DISABLED)
+
+    def show_google_help(self):
+        help_win = tk.Toplevel(self)
+        help_win.title("How to set up Google Cloud")
+        help_win.geometry("450x350")
+        help_win.resizable(False, False)
+        
+        txt = tk.Text(help_win, wrap=tk.WORD, padx=10, pady=10)
+        txt.pack(fill=tk.BOTH, expand=True)
+        
+        guide = (
+            "1. Go to https://console.cloud.google.com/\n"
+            "2. Create a new project.\n"
+            "3. Copy the 'Project ID' and paste it here.\n"
+            "4. Enable 'Cloud Translation API' in the API Library.\n"
+            "5. Create OAuth 2.0 Client ID (Desktop App) in Credentials.\n"
+            "6. Download the JSON file, rename it to 'client_secret.json', "
+            "and place it in the application folder.\n"
+            "7. Click 'Authorize' in this settings menu."
+        )
+        txt.insert(tk.END, guide)
+        txt.config(state=tk.DISABLED)
 
 
     def _on_select_region_button_click(self):
