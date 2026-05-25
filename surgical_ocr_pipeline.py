@@ -193,6 +193,14 @@ class SurgicalOcrPipeline:
 
             # Upscale 2x for speed
             hc, wc = raw_crop.shape[:2]
+            
+            # --- PRE-FILTER: Skip empty/background slices ---
+            gray_slice = cv2.cvtColor(raw_crop, cv2.COLOR_BGR2GRAY)
+            std = np.std(gray_slice)
+            if std < 15:
+                print(f"Slice {i} skipped — low variance (std={std:.1f})")
+                continue
+
             upscaled = cv2.resize(raw_crop, (wc*2, hc*2), interpolation=cv2.INTER_LANCZOS4)
             cv2.imwrite(f"debug/step2_slice_{i}_upscaled.png", upscaled)
             
@@ -208,13 +216,23 @@ class SurgicalOcrPipeline:
                     
                     if vision_res:
                         res_text = vision_res["raw_text"]
+                        
+                        # --- POST-FILTER: Handle 'no text' responses ---
+                        noise_phrases = ["no text", "cannot detect", "no readable", "don't see any", "cannot make out", "no visible text"]
+                        if any(phrase in res_text.lower() for phrase in noise_phrases):
+                            print(f"Slice {i} noise detected: '{res_text}'. Setting to empty.")
+                            res_text = ""
+                        
                         lang = vision_res["lang"]
                         translation = vision_res["translation"]
-                        print(f"Claude ({vision_res['model_used']}) Response: {res_text}")
+                        if res_text:
+                            print(f"Claude ({vision_res['model_used']}) Response: {res_text}")
                 else:
                     print("WARNING: anthropic_service is None, skipping recognition.")
             except Exception as e:
                 logger.error(f"Claude Vision failed: {e}")
+            
+            if not res_text: continue
             
             print(f"DIAGNOSTIC: RAW OCR Line {i}: '{res_text}' [{lang}]")
             
@@ -252,8 +270,14 @@ class SurgicalOcrPipeline:
                     struct_data["tag"] = "SYSTEM"
                 elif match:
                     struct_data["tag"] = self.chat_format.get("tag_label", "Chat")
-                    struct_data["sender"] = match.group(s_grp).strip()
-                    struct_data["message"] = match.group(m_grp).strip()
+                    sender = match.group(s_grp).strip()
+                    msg = match.group(m_grp).strip()
+                    
+                    # Fix duplication: strip leading sender from message
+                    msg = re.sub(r'^' + re.escape(sender) + r'\s*:\s*', '', msg, flags=re.IGNORECASE).strip()
+                    
+                    struct_data["sender"] = sender
+                    struct_data["message"] = msg
             except Exception as e:
                 logger.error(f"Structure parsing failed: {e}")
             

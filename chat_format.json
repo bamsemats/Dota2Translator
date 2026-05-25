@@ -1,6 +1,6 @@
 {
   "description": "Default configuration for Dota 2",
-  "parser_regex": "^\\[?(?:Allies|All|Team|Party)\\]?\\s*(.+?)\\s*(?:\\[\\w+\\])?\\s*[:;\\)]\\s*(.+)",
+  "parser_regex": "^\\[?(?:Allies|All|Team|Party)\\]?\\s*(?:#[wW])?\\s*(.+?)\\s*(?:\\[\\w+\\])?\\s*:\\s*(.+)",
   "system_keywords": [
     "bought back",
     "killed",

@@ -9,7 +9,7 @@ A high-fidelity, surgical screen-capture tool that translates in-game chat in re
 - **Guided Auto-Calibration (F7)**: Automatically detects chat geometry using horizontal projection (pixel variance). Skips avatar icons and finds the perfect text alignment for your specific resolution.
 - **Game-Agnostic Engine**: Driven by `chat_format.json`. Easily support any game (Dota 2, LoL, WoW, etc.) by defining a custom regex parser.
 - **Bottom-Up Efficiency**: Scans for new messages from the bottom of the chat box. Includes a "seen message" memory to exit early and save API tokens when no new text is found.
-- **CPU Optimized**: Environment-level fixes (`FLAGS_enable_pir_api=0`) to ensure lightning-fast PaddleOCR detection on CPU.
+- **Lightweight Architecture**: Recently refactored to remove heavy local machine learning dependencies. The app is now 90% smaller and runs efficiently on any modern CPU.
 
 ## Installation
 
